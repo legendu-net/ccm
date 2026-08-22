@@ -1,0 +1,7 @@
+[package]
+name = "ccm"
+version = "0.1.0"
+edition = "2024"
+description = "Contextual Commit Message — generate commit messages via OpenAI-compatible APIs or local agent CLIs"
+
+[dependencies]

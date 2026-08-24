@@ -1,1 +1,4 @@
 /target
+/.agents/skills/
+/.agents/execution/
+/.claude/skills/

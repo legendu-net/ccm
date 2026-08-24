@@ -34,9 +34,10 @@ use crate::config::model::{ApiKeySource, OpenAiApiEntry};
 use crate::env::Environment;
 use crate::error::GenerationError;
 use crate::prompt::{self, ResolvedPrompt};
+use futures::StreamExt;
 use litellm_rs::config::models::provider::ProviderConfig;
 use litellm_rs::core::completion::{
-    CompletionOptions, MessageContent, completion, system_message, user_message,
+    CompletionOptions, Message, completion_stream, system_message, user_message,
 };
 use litellm_rs::core::net::ProviderEndpointAccess;
 use litellm_rs::core::router::{
@@ -60,7 +61,12 @@ impl<'a> OpenAiGenerator<'a> {
 }
 
 impl MessageGenerator for OpenAiGenerator<'_> {
-    fn generate(&self, prompt: &ResolvedPrompt<'_>, diff: &str) -> Result<String, GenerationError> {
+    fn generate(
+        &self,
+        prompt: &ResolvedPrompt<'_>,
+        diff: &str,
+        stderr: &mut dyn std::io::Write,
+    ) -> Result<String, GenerationError> {
         let api_key = resolve_api_key(&self.entry.api_key, self.env)?;
         let user_message_text = prompt::openai_user_message(prompt.template, diff);
 
@@ -75,6 +81,7 @@ impl MessageGenerator for OpenAiGenerator<'_> {
             &api_key,
             prompt.system,
             &user_message_text,
+            stderr,
         ))
     }
 }
@@ -111,6 +118,7 @@ async fn call(
     api_key: &str,
     system: Option<&str>,
     user_message_text: &str,
+    stderr: &mut dyn std::io::Write,
 ) -> Result<String, GenerationError> {
     let mut settings = HashMap::new();
     if !entry.headers.is_empty() {
@@ -154,10 +162,11 @@ async fn call(
     // Belt-and-suspenders alongside the provider's own `timeout` (already applied as
     // the reqwest client timeout inside litellm-rs): guards against any router-level
     // retry/cooldown behavior silently extending the effective wall clock beyond what
-    // the configured timeout promises.
-    let response = tokio::time::timeout(
+    // the configured timeout promises. Wraps the whole stream (not just its setup), so
+    // a connection that opens fine but then stalls mid-stream is still bounded.
+    tokio::time::timeout(
         Duration::from_secs(entry.timeout_secs),
-        completion(&entry.model, messages, Some(options)),
+        collect_stream_text(&entry.model, messages, options, stderr),
     )
     .await
     .map_err(|_elapsed| {
@@ -166,22 +175,70 @@ async fn call(
             entry.timeout_secs
         ))
     })?
-    .map_err(|err| GenerationError::CallFailed(err.to_string()))?;
+}
 
-    let choice =
-        response.choices.into_iter().next().ok_or_else(|| {
-            GenerationError::MalformedResponse("response had no choices".to_string())
-        })?;
+/// Requests a streaming completion (via `completion_stream`, which always sets
+/// `stream: true` on the wire) and concatenates every chunk's delta content into the
+/// final message text. `ccm` always uses the streaming path rather than plain
+/// `completion()`: OmniRoute, the primary target, answers `/chat/completions` with an
+/// SSE stream regardless of the request's `stream` field, which a non-streaming JSON
+/// parse can't handle.
+///
+/// Tracks `saw_content` separately from the accumulated `text`: a stream that only ever
+/// carries `delta.content: ""` (or an empty string built from several such deltas) is a
+/// legitimate — if unusual — blank message, same as the old non-streaming path's
+/// `Some(MessageContent::Text(String::new()))` case, and must reach the caller as
+/// `Ok(String::new())` rather than `MalformedResponse`; only a stream that never
+/// carried a `delta.content` field at all is actually malformed.
+///
+/// Also logs the `model` field of the first chunk carrying real content via
+/// [`crate::progress::resolved_model`]: a gateway like OmniRoute can route
+/// `entry.model` (an alias `ccm` requested) to a different real upstream model, which
+/// a chunk's own `model` field reports. Deliberately NOT the first chunk overall: a
+/// slow upstream can make OmniRoute send periodic keep-alive chunks while it waits
+/// (observed on the wire: `{"id":"omniroute-keepalive","model":"omniroute","choices":
+/// [{"delta":{},"finish_reason":null}]}`, repeated every ~2.5s) — an empty `delta`
+/// (no `role`, no `content`) marks these, and their `model` is `"omniroute"` itself,
+/// not the real upstream, so latching onto the first chunk regardless of its `delta`
+/// would misreport the keep-alive sender as the answering model.
+async fn collect_stream_text(
+    model: &str,
+    messages: Vec<Message>,
+    options: CompletionOptions,
+    stderr: &mut dyn std::io::Write,
+) -> Result<String, GenerationError> {
+    let mut stream = completion_stream(model, messages, Some(options))
+        .await
+        .map_err(|err| GenerationError::CallFailed(err.to_string()))?;
 
-    match choice.message.content {
-        Some(MessageContent::Text(text)) => Ok(text),
-        Some(_) => Err(GenerationError::MalformedResponse(
-            "response content was not plain text".to_string(),
-        )),
-        None => Err(GenerationError::MalformedResponse(
-            "response had no message content".to_string(),
-        )),
+    let mut text = String::new();
+    let mut saw_content = false;
+    let mut logged_resolved_model = false;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| GenerationError::CallFailed(err.to_string()))?;
+        let has_real_delta = chunk
+            .choices
+            .iter()
+            .any(|choice| choice.delta.role.is_some() || choice.delta.content.is_some());
+        if !logged_resolved_model && !chunk.model.is_empty() && has_real_delta {
+            let _ = crate::progress::resolved_model(stderr, &chunk.model);
+            logged_resolved_model = true;
+        }
+        for choice in chunk.choices {
+            if let Some(content) = choice.delta.content {
+                saw_content = true;
+                text.push_str(&content);
+            }
+        }
     }
+
+    if !saw_content {
+        return Err(GenerationError::MalformedResponse(
+            "response had no message content".to_string(),
+        ));
+    }
+
+    Ok(text)
 }
 
 #[cfg(test)]

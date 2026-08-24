@@ -25,7 +25,12 @@ impl<'a> AgentCliGenerator<'a> {
 }
 
 impl MessageGenerator for AgentCliGenerator<'_> {
-    fn generate(&self, prompt: &ResolvedPrompt<'_>, diff: &str) -> Result<String, GenerationError> {
+    fn generate(
+        &self,
+        prompt: &ResolvedPrompt<'_>,
+        diff: &str,
+        _stderr: &mut dyn std::io::Write,
+    ) -> Result<String, GenerationError> {
         let args = prompt::substitute_args(&self.entry.args, prompt, &self.entry.model);
         let env: Vec<(String, String)> = self
             .entry
@@ -124,7 +129,9 @@ mod tests {
         );
         let cwd = std::env::temp_dir();
         let generator = AgentCliGenerator::new(&e, &cwd);
-        let out = generator.generate(&prompt(), "diff content here").unwrap();
+        let out = generator
+            .generate(&prompt(), "diff content here", &mut Vec::new())
+            .unwrap();
         assert_eq!(out, "MODEL=test-model PROMPT=write it\n");
     }
 
@@ -133,7 +140,9 @@ mod tests {
         let e = sh_script("cat", 30);
         let cwd = std::env::temp_dir();
         let generator = AgentCliGenerator::new(&e, &cwd);
-        let out = generator.generate(&prompt(), "the diff\n").unwrap();
+        let out = generator
+            .generate(&prompt(), "the diff\n", &mut Vec::new())
+            .unwrap();
         assert_eq!(out, "the diff\n");
     }
 
@@ -142,7 +151,9 @@ mod tests {
         let e = sh_script("printf '   \\n'", 30);
         let cwd = std::env::temp_dir();
         let generator = AgentCliGenerator::new(&e, &cwd);
-        let out = generator.generate(&prompt(), "diff").unwrap();
+        let out = generator
+            .generate(&prompt(), "diff", &mut Vec::new())
+            .unwrap();
         assert_eq!(out, "   \n");
     }
 
@@ -151,7 +162,9 @@ mod tests {
         let e = sh_script("echo 'Error: invalid model selection' >&2; exit 2", 30);
         let cwd = std::env::temp_dir();
         let generator = AgentCliGenerator::new(&e, &cwd);
-        let err = generator.generate(&prompt(), "diff").unwrap_err();
+        let err = generator
+            .generate(&prompt(), "diff", &mut Vec::new())
+            .unwrap_err();
         match err {
             GenerationError::CallFailed(msg) => {
                 assert!(msg.contains("invalid model selection"));
@@ -167,7 +180,7 @@ mod tests {
         let cwd = std::env::temp_dir();
         let generator = AgentCliGenerator::new(&e, &cwd);
         assert!(matches!(
-            generator.generate(&prompt(), "diff"),
+            generator.generate(&prompt(), "diff", &mut Vec::new()),
             Err(GenerationError::CallFailed(_))
         ));
     }
@@ -181,7 +194,9 @@ mod tests {
         let cwd = std::env::temp_dir();
         let generator = AgentCliGenerator::new(&e, &cwd);
         let start = std::time::Instant::now();
-        let err = generator.generate(&prompt(), "diff").unwrap_err();
+        let err = generator
+            .generate(&prompt(), "diff", &mut Vec::new())
+            .unwrap_err();
         match err {
             GenerationError::CallFailed(msg) => assert!(msg.contains("partial")),
             other => panic!("expected CallFailed, got {other:?}"),
@@ -196,7 +211,9 @@ mod tests {
             .insert("CCM_TEST_VAR".to_string(), "hello".to_string());
         let cwd = std::env::temp_dir();
         let generator = AgentCliGenerator::new(&e, &cwd);
-        let out = generator.generate(&prompt(), "diff").unwrap();
+        let out = generator
+            .generate(&prompt(), "diff", &mut Vec::new())
+            .unwrap();
         assert_eq!(out, "hello\n");
     }
 
@@ -208,7 +225,9 @@ mod tests {
         };
         let cwd = std::env::temp_dir();
         let generator = AgentCliGenerator::new(&e, &cwd);
-        let out = generator.generate(&prompt(), "diff").unwrap();
+        let out = generator
+            .generate(&prompt(), "diff", &mut Vec::new())
+            .unwrap();
         assert_eq!(out, "fixed\n");
     }
 }

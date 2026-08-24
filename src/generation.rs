@@ -49,8 +49,12 @@ pub fn generate(
     let _ = progress::generating_commit_message(stderr, &entry.name, model);
 
     let message = match &entry.kind {
-        EntryKind::OpenaiApi(inner) => OpenAiGenerator::new(inner, env).generate(&resolved, diff),
-        EntryKind::AgentCli(inner) => AgentCliGenerator::new(inner, cwd).generate(&resolved, diff),
+        EntryKind::OpenaiApi(inner) => {
+            OpenAiGenerator::new(inner, env).generate(&resolved, diff, stderr)
+        }
+        EntryKind::AgentCli(inner) => {
+            AgentCliGenerator::new(inner, cwd).generate(&resolved, diff, stderr)
+        }
     }?;
 
     if message.trim().is_empty() {

@@ -4,4 +4,28 @@ version = "0.1.0"
 edition = "2024"
 description = "Contextual Commit Message — generate commit messages via OpenAI-compatible APIs or local agent CLIs"
 
+[lib]
+name = "ccm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ccm"
+path = "src/main.rs"
+
 [dependencies]
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+shell-words = "1.1"
+tempfile = "3.27"
+thiserror = "2.0"
+nix = { version = "0.31", features = ["signal"] }
+litellm-rs = { version = "0.6", default-features = false, features = ["lite"] }
+tokio = { version = "1", features = ["rt", "time", "net", "macros"] }
+
+[dev-dependencies]
+assert_cmd = "2.2"
+predicates = "3.1"
+wiremock = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

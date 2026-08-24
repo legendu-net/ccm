@@ -1,0 +1,5 @@
+default:                       # key = prompt name, referenced from api.yaml's `prompt:` field
+  system: |                    # optional; system/instruction message
+    You are an expert software engineer who writes clear, conventional commit messages.
+  template: |                  # required; plain text, no placeholders
+    Write a commit message for the following changes.

@@ -774,7 +774,7 @@ Fields (per key):
 A top-level list — the first entry that is `enabled` wins (see Selection).
 
 ```yaml
-- name: omniroute              # unique id, used in error messages/logs
+- name: OmniRoute              # unique id, used in error messages/logs
   type: openai_api             # openai_api | agent_cli
   enabled: true
   prompt: default              # references a prompts.yaml key

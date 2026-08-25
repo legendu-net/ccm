@@ -263,12 +263,12 @@ mod tests {
     #[test]
     fn a_true_duplicate_name_is_rejected() {
         let entries = vec![
-            openai_entry("omniroute", "default"),
-            openai_entry("omniroute", "default"),
+            openai_entry("OmniRoute", "default"),
+            openai_entry("OmniRoute", "default"),
         ];
         assert!(matches!(
             validate(prompts_with("default"), entries),
-            Err(ConfigError::DuplicateName { name }) if name == "omniroute"
+            Err(ConfigError::DuplicateName { name }) if name == "OmniRoute"
         ));
     }
 

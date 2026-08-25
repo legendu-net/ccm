@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn embedded_assets_are_the_ones_written() {
         assert!(PROMPTS_YAML.contains("template:"));
-        assert!(API_YAML.contains("name: omniroute"));
+        assert!(API_YAML.contains("name: OmniRoute"));
         assert!(API_YAML.contains("name: gemini-cli"));
     }
 }

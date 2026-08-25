@@ -29,16 +29,28 @@ pub struct Cli {
     pub git: bool,
 
     /// Print the generated commit message to stdout instead of editing/committing.
-    #[arg(long)]
+    #[arg(short = 'd', long)]
     pub dry_run: bool,
 
     /// Use this directory instead of the default config directory.
-    #[arg(long, value_name = "DIR")]
+    #[arg(short = 'c', long, value_name = "DIR")]
     pub config: Option<PathBuf>,
 
     /// Create the config directory and example prompts.yaml/api.yaml, then exit.
-    #[arg(long)]
+    #[arg(short = 'g', long)]
     pub gen_config: bool,
+
+    /// List the tools/APIs configured in api.yaml, then exit.
+    #[arg(short = 'l', long)]
+    pub list_tools: bool,
+
+    /// Use this api.yaml entry by name for this run, regardless of its `enabled` flag.
+    #[arg(short = 't', long, value_name = "NAME")]
+    pub tool: Option<String>,
+
+    /// Pick the tool/API interactively from a numbered list.
+    #[arg(short = 'i', long)]
+    pub interactive: bool,
 }
 
 impl Cli {
@@ -57,10 +69,29 @@ pub fn validate_shape(cli: &Cli) -> Result<(), UsageError> {
     if !cli.include.is_empty() && !cli.exclude.is_empty() {
         return Err(UsageError::IncludeExcludeConflict);
     }
+    if cli.tool.is_some() && cli.interactive {
+        return Err(UsageError::ToolAndInteractive);
+    }
     if cli.gen_config
-        && (cli.git || cli.dry_run || !cli.include.is_empty() || !cli.exclude.is_empty())
+        && (cli.git
+            || cli.dry_run
+            || cli.list_tools
+            || cli.tool.is_some()
+            || cli.interactive
+            || !cli.include.is_empty()
+            || !cli.exclude.is_empty())
     {
         return Err(UsageError::GenConfigWithOtherFlags);
+    }
+    if cli.list_tools
+        && (cli.git
+            || cli.dry_run
+            || cli.interactive
+            || cli.tool.is_some()
+            || !cli.include.is_empty()
+            || !cli.exclude.is_empty())
+    {
+        return Err(UsageError::ListToolsWithOtherFlags);
     }
     Ok(())
 }
@@ -77,6 +108,9 @@ mod tests {
             dry_run: false,
             config: None,
             gen_config: false,
+            list_tools: false,
+            tool: None,
+            interactive: false,
         }
     }
 
@@ -145,6 +179,112 @@ mod tests {
     }
 
     #[test]
+    fn gen_config_with_list_tools_is_rejected() {
+        let mut cli = base();
+        cli.gen_config = true;
+        cli.list_tools = true;
+        assert!(matches!(
+            validate_shape(&cli),
+            Err(UsageError::GenConfigWithOtherFlags)
+        ));
+    }
+
+    #[test]
+    fn gen_config_with_tool_is_rejected() {
+        let mut cli = base();
+        cli.gen_config = true;
+        cli.tool = Some("x".into());
+        assert!(matches!(
+            validate_shape(&cli),
+            Err(UsageError::GenConfigWithOtherFlags)
+        ));
+    }
+
+    #[test]
+    fn gen_config_with_interactive_is_rejected() {
+        let mut cli = base();
+        cli.gen_config = true;
+        cli.interactive = true;
+        assert!(matches!(
+            validate_shape(&cli),
+            Err(UsageError::GenConfigWithOtherFlags)
+        ));
+    }
+
+    #[test]
+    fn tool_and_interactive_together_is_rejected() {
+        let mut cli = base();
+        cli.tool = Some("x".into());
+        cli.interactive = true;
+        assert!(matches!(
+            validate_shape(&cli),
+            Err(UsageError::ToolAndInteractive)
+        ));
+    }
+
+    #[test]
+    fn list_tools_alone_is_fine() {
+        let mut cli = base();
+        cli.list_tools = true;
+        assert!(validate_shape(&cli).is_ok());
+    }
+
+    #[test]
+    fn list_tools_with_config_dir_is_fine() {
+        let mut cli = base();
+        cli.list_tools = true;
+        cli.config = Some(PathBuf::from("/tmp/x"));
+        assert!(validate_shape(&cli).is_ok());
+    }
+
+    #[test]
+    fn list_tools_with_dry_run_is_rejected() {
+        let mut cli = base();
+        cli.list_tools = true;
+        cli.dry_run = true;
+        assert!(matches!(
+            validate_shape(&cli),
+            Err(UsageError::ListToolsWithOtherFlags)
+        ));
+    }
+
+    #[test]
+    fn list_tools_with_tool_is_rejected() {
+        let mut cli = base();
+        cli.list_tools = true;
+        cli.tool = Some("x".into());
+        assert!(matches!(
+            validate_shape(&cli),
+            Err(UsageError::ListToolsWithOtherFlags)
+        ));
+    }
+
+    #[test]
+    fn list_tools_with_interactive_is_rejected() {
+        let mut cli = base();
+        cli.list_tools = true;
+        cli.interactive = true;
+        assert!(matches!(
+            validate_shape(&cli),
+            Err(UsageError::ListToolsWithOtherFlags)
+        ));
+    }
+
+    #[test]
+    fn interactive_alone_is_fine() {
+        let mut cli = base();
+        cli.interactive = true;
+        assert!(validate_shape(&cli).is_ok());
+    }
+
+    #[test]
+    fn tool_alone_is_fine() {
+        let mut cli = base();
+        cli.tool = Some("x".into());
+        assert!(validate_shape(&cli).is_ok());
+    }
+
+    #[test]
     fn cli_parses_a_representative_invocation() {
         let cli = Cli::parse_from([
             "ccm",
@@ -161,5 +301,42 @@ mod tests {
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/cfg")));
         assert!(!cli.git);
         assert!(!cli.gen_config);
+        assert!(!cli.list_tools);
+        assert_eq!(cli.tool, None);
+        assert!(!cli.interactive);
+    }
+
+    #[test]
+    fn cli_parses_tool_and_interactive_flags() {
+        let cli = Cli::parse_from(["ccm", "--tool", "OmniRoute"]);
+        assert_eq!(cli.tool, Some("OmniRoute".to_string()));
+        assert!(!cli.interactive);
+
+        let cli = Cli::parse_from(["ccm", "-i"]);
+        assert!(cli.interactive);
+
+        let cli = Cli::parse_from(["ccm", "--interactive"]);
+        assert!(cli.interactive);
+
+        let cli = Cli::parse_from(["ccm", "--list-tools"]);
+        assert!(cli.list_tools);
+    }
+
+    #[test]
+    fn short_flags_are_equivalent_to_their_long_forms() {
+        let cli = Cli::parse_from(["ccm", "-t", "OmniRoute"]);
+        assert_eq!(cli.tool, Some("OmniRoute".to_string()));
+
+        let cli = Cli::parse_from(["ccm", "-l"]);
+        assert!(cli.list_tools);
+
+        let cli = Cli::parse_from(["ccm", "-g"]);
+        assert!(cli.gen_config);
+
+        let cli = Cli::parse_from(["ccm", "-c", "/tmp/cfg"]);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/cfg")));
+
+        let cli = Cli::parse_from(["ccm", "-d"]);
+        assert!(cli.dry_run);
     }
 }

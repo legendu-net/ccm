@@ -24,7 +24,7 @@ impl ExitCode {
     pub const GEN_CONFIG_FAILED: ExitCode = ExitCode(3);
     pub const NOT_A_REPO: ExitCode = ExitCode(4);
     pub const CONFIG_ERROR: ExitCode = ExitCode(5);
-    pub const NO_ENABLED_TOOL: ExitCode = ExitCode(6);
+    pub const SELECTION_FAILED: ExitCode = ExitCode(6);
     pub const DIFF_FAILED: ExitCode = ExitCode(7);
     pub const NOTHING_TO_DIFF: ExitCode = ExitCode(8);
     pub const API_KEY_FAILED: ExitCode = ExitCode(9);
@@ -69,6 +69,10 @@ pub enum UsageError {
     IncludeExcludeUnderGit,
     #[error("{entry}: does not match any file in the jj working copy")]
     UnmatchedPath { entry: String },
+    #[error("--tool and --interactive are mutually exclusive")]
+    ToolAndInteractive,
+    #[error("--list-tools cannot be combined with any flag other than --config")]
+    ListToolsWithOtherFlags,
 }
 
 /// Stage 1 (short-circuit): `--gen-config` failed to create the config directory or
@@ -112,10 +116,15 @@ pub enum ConfigError {
     MissingField { entry: String, field: &'static str },
 }
 
-/// Stage 5: every `api.yaml` entry is disabled (exit 6).
+/// Stage 5: tool/API selection failed (exit 6) — either every `api.yaml` entry is
+/// disabled, or `--tool <NAME>` matched no entry.
 #[derive(Debug, thiserror::Error)]
-#[error("no enabled tool/API in api.yaml")]
-pub struct SelectionError;
+pub enum SelectionError {
+    #[error("no enabled tool/API in api.yaml")]
+    NoEnabledTool,
+    #[error("no api.yaml entry named {name}")]
+    UnknownTool { name: String },
+}
 
 /// Stage 6: diff enumeration/generation (exit 7), and nothing to diff (exit 8).
 #[derive(Debug, thiserror::Error)]
@@ -212,7 +221,7 @@ impl CcmError {
             CcmError::GenConfig(_) => ExitCode::GEN_CONFIG_FAILED,
             CcmError::NotARepo(_) => ExitCode::NOT_A_REPO,
             CcmError::Config(_) => ExitCode::CONFIG_ERROR,
-            CcmError::Selection(_) => ExitCode::NO_ENABLED_TOOL,
+            CcmError::Selection(_) => ExitCode::SELECTION_FAILED,
             CcmError::Diff(DiffError::Enumeration(_) | DiffError::Generation(_)) => {
                 ExitCode::DIFF_FAILED
             }
@@ -247,6 +256,8 @@ mod tests {
             (UsageError::GitFlagOutsideGitRepo.into(), 2),
             (UsageError::IncludeExcludeUnderGit.into(), 2),
             (UsageError::UnmatchedPath { entry: "x".into() }.into(), 2),
+            (UsageError::ToolAndInteractive.into(), 2),
+            (UsageError::ListToolsWithOtherFlags.into(), 2),
             (GenConfigError("boom".into()).into(), 3),
             (NotARepo.into(), 4),
             (ConfigError::Empty.into(), 5),
@@ -276,7 +287,8 @@ mod tests {
                 .into(),
                 5,
             ),
-            (SelectionError.into(), 6),
+            (SelectionError::NoEnabledTool.into(), 6),
+            (SelectionError::UnknownTool { name: "x".into() }.into(), 6),
             (DiffError::Enumeration("x".into()).into(), 7),
             (DiffError::Generation("x".into()).into(), 7),
             (DiffError::Empty.into(), 8),

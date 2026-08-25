@@ -30,6 +30,10 @@ both files (never overwriting an existing one). See `prd.md`'s "Configuration" s
 for the full field reference (`type: openai_api` vs `type: agent_cli`, `headers`,
 `timeout`, `{{prompt}}`/`{{model}}`/`{{system}}` substitution, etc.).
 
+Run `ccm --list-tools` to see what's configured. `--tool <NAME>` and `--interactive`/`-i`
+override the first-enabled rule for a single run — the former picks a named entry
+outright (even a disabled one), the latter prompts you to pick one from a numbered menu.
+
 ## CLI flags
 
 | Flag | Meaning |
@@ -37,9 +41,12 @@ for the full field reference (`type: openai_api` vs `type: agent_cli`, `headers`
 | `--include <FILE\|DIR>...` | Restrict the diff to these paths (jj only). |
 | `--exclude <FILE\|DIR>...` | Exclude these paths from the diff (jj only). |
 | `--git` | Force git handling in a colocated (git + jj) repository. |
-| `--dry-run` | Print the generated message to stdout; don't open `$EDITOR` or commit. |
-| `--config <DIR>` | Use `<DIR>` as the config directory instead of the default. |
-| `--gen-config` | Create the config directory and example files, then exit. |
+| `-d`, `--dry-run` | Print the generated message to stdout; don't open `$EDITOR` or commit. |
+| `-c`, `--config <DIR>` | Use `<DIR>` as the config directory instead of the default. |
+| `-g`, `--gen-config` | Create the config directory and example files, then exit. |
+| `-l`, `--list-tools` | List the `api.yaml` entries (name, type, enabled/disabled), then exit. |
+| `-t`, `--tool <NAME>` | Use this `api.yaml` entry for this run, regardless of its `enabled` flag. |
+| `-i`, `--interactive` | Pick the tool/API interactively from a numbered list. |
 
 ## Exit codes
 
@@ -56,7 +63,7 @@ earliest-listed stage below wins.
 | 3 | `--gen-config` failed to create the config directory or write a file |
 | 4 | Not a git or jj repository |
 | 5 | Config error — `api.yaml`/`prompts.yaml` missing, unreadable, malformed, or fails cross-validation |
-| 6 | No enabled tool/API — every `api.yaml` entry is disabled |
+| 6 | Tool/API selection failed — every `api.yaml` entry is disabled, or `--tool <NAME>` matched no entry |
 | 7 | Diff generation failed — the underlying `git diff`/`jj diff` (or jj's enumeration call) itself errored |
 | 8 | Nothing to diff — no staged changes (git), or an empty scope after `--include`/`--exclude` (jj) |
 | 9 | API key resolution failed |
@@ -64,7 +71,7 @@ earliest-listed stage below wins.
 | 11 | Malformed response (`openai_api` only) |
 | 12 | Editor unavailable — `$EDITOR` doesn't resolve, or is unset with no `nvim`/`vim`/`vi` on `$PATH` |
 | 13 | Editor aborted — `$EDITOR` exited non-zero |
-| 14 | Aborted — the jj commit-command picker was cancelled (EOF on stdin) |
+| 14 | Aborted — an interactive picker (the `--interactive` tool picker, or the jj commit-command picker) was cancelled (EOF on stdin) |
 | 15 | Empty commit message |
 | 16 | Commit failed — the `git commit`/`jj commit`\|`describe`\|`split` invocation failed |
 | 17 | Temp file creation/write failed |

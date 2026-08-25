@@ -4,7 +4,7 @@
 //! picker being cancelled; 16, the commit invocation itself failing) within one
 //! spec-numbered stage, so it returns [`CcmError`] directly.
 
-use crate::error::{CcmError, CommitError, PickerCancelled};
+use crate::error::{CcmError, CommitError};
 use crate::picker;
 use crate::progress;
 use crate::repo::RepoHandling;
@@ -62,13 +62,7 @@ fn commit_jj(
     // is required to have matched at least one line).
     let scoped = !files.is_empty();
     let choices = picker::choices(scoped);
-    let picked = picker::prompt(stdin, stderr, &choices).map_err(|err| {
-        if matches!(err, picker::PickerError::Cancelled) {
-            CcmError::from(PickerCancelled)
-        } else {
-            CcmError::Unexpected(err.to_string())
-        }
-    })?;
+    let picked = picker::prompt(stdin, stderr, &choices).map_err(picker::to_ccm_error)?;
 
     let args = argv::jj_commit_command_args(picked, message, files);
     let command = argv::render_command("jj", &args);

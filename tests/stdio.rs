@@ -132,6 +132,36 @@ fn error_paths_across_stages_all_leave_stdout_empty() {
 }
 
 #[test]
+fn list_tools_output_is_on_stdout_and_stderr_stays_empty() {
+    let fx = Fixture::new();
+    fx.write_valid_config();
+    fx.ccm()
+        .args(["--list-tools", "--config"])
+        .arg(fx.config_dir())
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains('a'))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn interactive_tool_prompt_is_on_stderr_and_stdout_holds_only_the_message() {
+    let fx = Fixture::new();
+    fx.init_git();
+    fx.write_valid_config(); // a single agent_cli entry named "a"
+    fx.write("a.txt", "hello\n");
+    fx.stage("a.txt");
+    fx.ccm()
+        .args(["--interactive", "--dry-run", "--config"])
+        .arg(fx.config_dir())
+        .write_stdin("0\n")
+        .assert()
+        .code(0)
+        .stdout("feat: test commit message\n")
+        .stderr(predicate::str::contains("Select a tool"));
+}
+
+#[test]
 fn full_jj_include_run_progress_lines_appear_on_stderr_in_order() {
     let fx = Fixture::new();
     fx.init_jj();

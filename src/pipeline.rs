@@ -4,13 +4,14 @@
 //! check order — later stages are simply never reached once an earlier one returns
 //! `Err` via `?`.
 //!
-//! This now covers the full spec: stage 1 (argument shape), the `--gen-config`
-//! short-circuit, stage 2 (repository detection), stage 3 (repo-dependent argument
-//! validation), stage 4 (config load & validation), stage 5 (tool/API selection),
-//! stage 6 (diff generation), stage 7 (message generation), and stage 8
-//! (`--dry-run`'s immediate blank check and raw stdout print, or the default mode's
-//! full `$EDITOR` flow followed by the jj commit-command picker and the final commit
-//! invocation).
+//! This now covers the full spec: stage 1 (argument shape), the `--gen-config` and
+//! `--list-tools` short-circuits, stage 2 (repository detection), stage 3
+//! (repo-dependent argument validation), stage 4 (config load & validation), stage 5
+//! (tool/API selection — the first enabled entry, or an explicit `--tool <NAME>`, or an
+//! `--interactive` pick), stage 6 (diff generation), stage 7 (message generation), and
+//! stage 8 (`--dry-run`'s immediate blank check and raw stdout print, or the default
+//! mode's full `$EDITOR` flow followed by the jj commit-command picker and the final
+//! commit invocation).
 
 use crate::cli::{self, Cli};
 use crate::commit;
@@ -20,6 +21,7 @@ use crate::editor;
 use crate::env::Environment;
 use crate::error::{CcmError, EditorError, UsageError};
 use crate::generation;
+use crate::picker;
 use crate::repo::{self, RepoHandling};
 use crate::vcs::scope::Selection;
 use std::io::BufRead;
@@ -55,6 +57,20 @@ pub fn run(
         return Ok(());
     }
 
+    // `--list-tools` also short-circuits every later stage, for the same reason as
+    // `--gen-config`: it only needs the config, not a repo, so it works from anywhere.
+    // It still goes through stage-4 config load & validation (so a malformed api.yaml
+    // is exit 5 here too), but never reaches repo detection or tool selection.
+    if cli.list_tools {
+        let dir = paths::resolve_config_dir(cli.config.as_deref(), env)
+            .map_err(|err| CcmError::Unexpected(format!("failed to resolve cwd: {err}")))?;
+        let loaded = config::loader::load(&dir)?;
+        for line in config::listing::lines(&loaded.entries) {
+            writeln!(out, "{line}").map_err(|err| CcmError::Unexpected(err.to_string()))?;
+        }
+        return Ok(());
+    }
+
     // Stage 2: repository detection.
     let cwd = env
         .current_dir()
@@ -76,9 +92,20 @@ pub fn run(
     let loaded = config::loader::load(&config_dir)?;
 
     // Stage 5: tool/API selection — a trivial list scan with no probing of any kind
-    // (see "Selection"), so an api.yaml with every entry disabled fails fast before
-    // diff generation ever runs.
-    let selected = config::validate::select_first_enabled(&loaded.entries)?;
+    // (see "Selection"), so an api.yaml with every entry disabled (or an unmatched
+    // `--tool <NAME>`) fails fast before diff generation ever runs. `--tool` overrides
+    // the first-enabled rule outright, including selecting a disabled entry; absent
+    // that, `--interactive` prompts for one of `loaded.entries` (never empty — an empty
+    // api.yaml is already `ConfigError::Empty` at stage 4).
+    let selected = if let Some(name) = cli.tool.as_deref() {
+        config::validate::select_by_name(&loaded.entries, name)?
+    } else if cli.interactive {
+        let lines = config::listing::lines(&loaded.entries);
+        let index = picker::prompt_index(stdin, stderr, &lines).map_err(picker::to_ccm_error)?;
+        &loaded.entries[index]
+    } else {
+        config::validate::select_first_enabled(&loaded.entries)?
+    };
 
     // Stage 6: diff generation.
     let selection = Selection::from_cli(&cli.include, &cli.exclude);
@@ -140,6 +167,9 @@ mod tests {
             dry_run: false,
             config: None,
             gen_config: false,
+            list_tools: false,
+            tool: None,
+            interactive: false,
         }
     }
 
@@ -277,5 +307,150 @@ mod tests {
         assert!(target.join("api.yaml").is_file());
         let printed = String::from_utf8(out).unwrap();
         assert!(printed.contains("created"));
+    }
+
+    fn write_two_entry_config(config_dir: &std::path::Path) {
+        std::fs::create_dir_all(config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("prompts.yaml"),
+            "default:\n  template: write it\n",
+        )
+        .unwrap();
+        std::fs::write(
+            config_dir.join("api.yaml"),
+            "- name: a\n  type: openai_api\n  prompt: default\n  base_url: http://x\n  model: m\n  api_key:\n    env: K\n\
+             - name: b\n  type: openai_api\n  enabled: false\n  prompt: default\n  base_url: http://y\n  model: m\n  api_key:\n    env: K\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_tools_short_circuits_before_repo_detection() {
+        // cwd is not a repo at all; --list-tools must still succeed.
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: tmp.path().join("not-a-repo"),
+            ..FakeEnvironment::new()
+        };
+        std::fs::create_dir_all(&env.cwd).unwrap();
+        let mut cli = base_cli();
+        cli.list_tools = true;
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains('a'));
+        assert!(printed.contains('b'));
+        assert!(printed.contains("[enabled]"));
+        assert!(printed.contains("[disabled]"));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn list_tools_with_malformed_config_surfaces_as_exit_5() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("prompts.yaml"), "default:\n  template: x\n").unwrap();
+        std::fs::write(config_dir.join("api.yaml"), "not: [valid\n").unwrap();
+        let env = FakeEnvironment {
+            cwd: tmp.path().join("not-a-repo"),
+            ..FakeEnvironment::new()
+        };
+        std::fs::create_dir_all(&env.cwd).unwrap();
+        let mut cli = base_cli();
+        cli.list_tools = true;
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 5);
+    }
+
+    #[test]
+    fn unknown_tool_name_surfaces_as_exit_6() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new()
+        };
+        let mut cli = base_cli();
+        cli.tool = Some("no-such-tool".to_string());
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 6);
+    }
+
+    #[test]
+    fn tool_flag_can_select_a_disabled_entry_and_reaches_diff_generation() {
+        // "b" is disabled but still selectable via --tool; with nothing staged in a
+        // fresh git repo, selection must succeed and fail only later, at stage 6
+        // (nothing to diff, exit 8) — proving --tool bypassed exit 6 outright.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new()
+        };
+        let mut cli = base_cli();
+        cli.tool = Some("b".to_string());
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+    }
+
+    #[test]
+    fn interactive_picker_cancelled_on_eof_surfaces_as_exit_14() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new()
+        };
+        let mut cli = base_cli();
+        cli.interactive = true;
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 14);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(printed.contains("Select a tool"));
     }
 }

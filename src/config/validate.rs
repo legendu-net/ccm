@@ -144,12 +144,28 @@ fn build_api_key(entry: &str, raw: RawApiKey) -> Result<ApiKeySource, ConfigErro
 /// "Selection"). Pure.
 ///
 /// # Errors
-/// [`SelectionError`] (exit 6) if every entry is disabled.
+/// [`SelectionError::NoEnabledTool`] (exit 6) if every entry is disabled.
 pub fn select_first_enabled(entries: &[Entry]) -> Result<&Entry, SelectionError> {
     entries
         .iter()
         .find(|entry| entry.enabled)
-        .ok_or(SelectionError)
+        .ok_or(SelectionError::NoEnabledTool)
+}
+
+/// `--tool <NAME>` override (prd.md "Selection"): selects the entry whose `name`
+/// matches `name` exactly, byte-for-byte and case-sensitive — the same comparison the
+/// uniqueness check uses — regardless of its `enabled` flag. Entry names are already
+/// validated as unique before this runs, so the first match is the only match. Pure.
+///
+/// # Errors
+/// [`SelectionError::UnknownTool`] (exit 6) if no entry has that name.
+pub fn select_by_name<'a>(entries: &'a [Entry], name: &str) -> Result<&'a Entry, SelectionError> {
+    entries
+        .iter()
+        .find(|entry| entry.name == name)
+        .ok_or_else(|| SelectionError::UnknownTool {
+            name: name.to_string(),
+        })
 }
 
 #[cfg(test)]
@@ -413,5 +429,51 @@ mod tests {
         .unwrap();
         let selected = select_first_enabled(&config.entries).unwrap();
         assert_eq!(selected.name, "first");
+    }
+
+    // ---- select_by_name ----
+
+    #[test]
+    fn select_by_name_finds_a_matching_entry() {
+        let config = validate(
+            prompts_with("default"),
+            vec![
+                openai_entry("first", "default"),
+                openai_entry("second", "default"),
+            ],
+        )
+        .unwrap();
+        let selected = select_by_name(&config.entries, "second").unwrap();
+        assert_eq!(selected.name, "second");
+    }
+
+    #[test]
+    fn select_by_name_finds_a_disabled_entry() {
+        let mut disabled = openai_entry("first", "default");
+        disabled.enabled = false;
+        let config = validate(prompts_with("default"), vec![disabled]).unwrap();
+        let selected = select_by_name(&config.entries, "first").unwrap();
+        assert!(!selected.enabled);
+    }
+
+    #[test]
+    fn select_by_name_unknown_name_is_a_selection_error() {
+        let config = validate(prompts_with("default"), vec![openai_entry("a", "default")]).unwrap();
+        let err = select_by_name(&config.entries, "b").unwrap_err();
+        assert!(matches!(
+            err,
+            SelectionError::UnknownTool { name } if name == "b"
+        ));
+    }
+
+    #[test]
+    fn select_by_name_is_byte_exact_case_sensitive() {
+        let config = validate(
+            prompts_with("default"),
+            vec![openai_entry("OmniRoute", "default")],
+        )
+        .unwrap();
+        assert!(select_by_name(&config.entries, "omniroute").is_err());
+        assert!(select_by_name(&config.entries, "OmniRoute").is_ok());
     }
 }

@@ -2,6 +2,7 @@
 //! `prompts.yaml`/`api.yaml` for the normal generation flow.
 
 pub mod gen_config;
+pub mod listing;
 pub mod loader;
 pub mod model;
 pub mod paths;

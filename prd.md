@@ -69,6 +69,11 @@ Supported platforms: Linux and macOS only. Windows is out of scope — no
     Selection in Configuration.)
     See Error Handling for how failures are reported.
 
+    The user can also list what's configured (`--list-tools`) and override this
+    automatic first-enabled choice for a single run (`--tool <NAME>`, `--interactive`) —
+    see CLI Interface and Selection. Neither is a fallback mechanism: exactly one entry
+    is still tried per run, just chosen a different way.
+
 5. Allow the user to customize the prompt to use for each tool/API.
     Since most tools/APIs might use the same prompt,
     the best way is to allow the user to configure a set of named prompts (`prompts.yaml`, see Configuration)
@@ -212,10 +217,10 @@ Flags:
     below: this includes the case where a git root does technically exist somewhere in
     the ancestry but a deeper jj root wins, so the directory is still resolved as a jj
     repository.
-- `--dry-run` — print the generated commit message to stdout only;
+- `--dry-run` / `-d` — print the generated commit message to stdout only;
     do not open `$EDITOR` and do not commit. Unlike default mode, this does not require
     an interactive terminal (see "Interactive terminal requirement" below).
-- `--config <DIR>` — Use `<DIR>` as the config directory instead of the default —
+- `--config <DIR>` / `-c <DIR>` — Use `<DIR>` as the config directory instead of the default —
     both for reading `prompts.yaml`/`api.yaml` in the normal generation flow, and as the
     directory `--gen-config` creates/populates (see below). Given as any path, absolute
     or relative to the current working directory. This is the one exception to
@@ -228,7 +233,7 @@ Flags:
     directory" or "the default config directory" elsewhere in this document means this
     resolved default unless `--config` was passed, in which case it means the directory
     `--config` names.
-- `--gen-config` — create the config directory (the default described under `--config`
+- `--gen-config` / `-g` — create the config directory (the default described under `--config`
     above, or the directory given via `--config`) if it doesn't already exist, write the filled
     example `prompts.yaml` and `api.yaml` shown in Configuration for any of the two that
     don't already exist, then exit with code 0. Never overwrites an existing file. For
@@ -247,6 +252,26 @@ Flags:
     writing a file, disk full, the config directory already existing as a
     non-directory, etc.) is reported to stderr and exits with code 3 rather than
     partially succeeding silently.
+- `--list-tools` / `-l` — print every `api.yaml` entry (from the config directory resolved the
+    same way as above), one per line, in file order — name, `type`, and an
+    `[enabled]`/`[disabled]` marker — then exit with code 0. Like `--gen-config`, this
+    short-circuits every later stage and does not require being run inside a git or jj
+    repository; unlike `--gen-config`, it still goes through Config load & validation
+    (exit code 5 on a malformed `prompts.yaml`/`api.yaml`), since there's nothing to list
+    otherwise. Writes to stdout, same as `--gen-config`. Mutually exclusive with every
+    other flag except `--config`.
+- `--tool <NAME>` / `-t <NAME>` — use the `api.yaml` entry named `NAME` for this run, in place of the
+    normal "first `enabled: true` entry" rule (see Selection) — including selecting an
+    entry whose `enabled` is `false`. Matches `name:` exactly, byte-for-byte and
+    case-sensitive, the same comparison `api.yaml`'s own name-uniqueness check uses. If no
+    entry has that name, that's a selection failure (exit code 6), same as "every entry
+    disabled." Mutually exclusive with `--interactive` (exit code 2).
+- `--interactive` / `-i` — pick the tool/API to use for this run from a numbered menu
+    (the same listing `--list-tools` prints) read from stdin, in place of the normal
+    "first `enabled: true` entry" rule. Needs a genuine interactive terminal, same as the
+    jj commit-command picker (see "Interactive terminal requirement"): EOF on stdin before
+    a valid selection is made cancels the run (exit code 14). Mutually exclusive with
+    `--tool` (exit code 2).
 
 Passing both `--include` and `--exclude` in the same invocation is a usage error (exit code 2).
 Passing `--include` or `--exclude` while the repository is being handled as git (a plain
@@ -256,6 +281,10 @@ Passing `--gen-config` together with any flag other than `--config` is also a us
 error (exit code 2).
 Passing `--git` when the current directory isn't a git repository at all is also a usage
 error (exit code 2).
+Passing `--list-tools` together with any flag other than `--config` is also a usage error
+(exit code 2).
+Passing both `--tool` and `--interactive` in the same invocation is also a usage error
+(exit code 2).
 
 ### Interactive terminal requirement
 
@@ -270,8 +299,14 @@ EOF-cancels-the-picker behavior (exit code 14, see "jj commit commands"), and an
 that can't attach to a controlling terminal typically exits non-zero, which `ccm` treats
 as an aborted edit (exit code 13, see "Default behavior").
 
-`--dry-run` has no such requirement: it never opens `$EDITOR` and never reads the
-jj-command picker's stdin prompt (see "Default behavior" and "jj commit commands"), so
+`--interactive` adds a second stdin prompt — the tool picker (see "Selection") — at
+stage 5, before diff generation. Unlike the jj commit-command picker, this one runs
+regardless of `--dry-run`: `--interactive --dry-run` still needs interactive stdin for
+the tool picker itself (EOF cancels the run the same way, exit code 14), even though
+`--dry-run` skips `$EDITOR` and the jj picker that come later.
+
+Otherwise, `--dry-run` has no such requirement: it never opens `$EDITOR` and never reads
+the jj-command picker's stdin prompt (see "Default behavior" and "jj commit commands"), so
 it runs correctly with stdin/stdout piped, redirected, or absent entirely. This split is
 deliberate, matching the two ways `ccm` is meant to be used (see Goal): default mode is
 for direct interactive use of `ccm` from a shell, while `--dry-run` is what a
@@ -889,6 +924,25 @@ selection-time failure (exit 6) into an earlier, differently-coded one, which is
 the added mechanism (see Requirement 4 for why an earlier design that *did* probe
 per-entry availability was dropped).
 
+`--tool <NAME>` and `--interactive` (see CLI Interface) override this default rule for
+one run, without touching `api.yaml` itself — this is a per-invocation override, not a
+second fallback tier, so Requirement 4's "no fallback" still holds: exactly one entry is
+still tried, it's just chosen a different way.
+
+- `--tool <NAME>` selects the entry whose `name` matches `NAME` exactly — the same
+    byte-for-byte, case-sensitive comparison used for the uniqueness check above —
+    regardless of its `enabled` flag; a disabled entry is a legitimate target. No match is
+    a selection failure (exit 6), same as "every entry disabled."
+- `--interactive` prints the same name/type/enabled listing `--list-tools` does, as a
+    numbered stdin menu, and selects whichever entry the user picks — again regardless of
+    `enabled`. Cancelling the prompt (EOF on stdin before a valid choice) is exit 14, not
+    exit 6, since a tool *was* available to select — the user simply didn't finish picking
+    one (see "Interactive terminal requirement").
+
+Either way, the name-uniqueness and prompt-reference validation above still runs first,
+unconditionally — a `--tool`/`--interactive` run is never let through with an
+otherwise-invalid `api.yaml`.
+
 Once an entry is selected, everything else is a hard failure with no fallback to the
 next entry — including the configured `agent_cli` `command` not resolving at all,
 API key resolution failing, network/connection errors, exceeding the entry's `timeout`
@@ -910,11 +964,16 @@ missing, and `--include` given), the earliest stage below determines the exit co
 later stages are never reached:
 
 1. **Argument shape** — usage errors that don't depend on repo state: `--include` and
-   `--exclude` together, `--gen-config` combined with any flag other than `--config`
-   (exit code 2). If `--gen-config` is present and passes this check, `ccm` creates the
-   config directory (the default described under `--config` in Flags, or the directory
-   given via `--config`) and the missing config file(s) (exit code 3 on failure) and
-   exits, skipping every stage below.
+   `--exclude` together, `--tool` and `--interactive` together, `--gen-config` combined
+   with any flag other than `--config`, `--list-tools` combined with any flag other than
+   `--config` (exit code 2). If `--gen-config` is present and passes this check, `ccm`
+   creates the config directory (the default described under `--config` in Flags, or the
+   directory given via `--config`) and the missing config file(s) (exit code 3 on
+   failure) and exits, skipping every stage below. Otherwise, if `--list-tools` is
+   present and passes this check, `ccm` loads and validates
+   `prompts.yaml`/`api.yaml` from the config directory (exit code 5 on failure, same as
+   stage 4 below), prints the entry listing (exit code 0), and exits, likewise skipping
+   every stage below — including repository detection.
 2. **Repository detection** — the git/jj checks in "Repository detection" (exit code 4
    if neither succeeds).
 3. **Repo-dependent argument validation** — usage errors that need the repo type from
@@ -923,10 +982,14 @@ later stages are never reached:
 4. **Config load & validation** — reading, parsing, and cross-validating
    `prompts.yaml`/`api.yaml` from the config directory (the default described under
    `--config` in Flags, or the directory given via `--config`) (exit code 5).
-5. **Tool/API selection** — walking `api.yaml` for the first `enabled` entry (exit code
-   6 if none are enabled). This runs before diff generation: selection is a trivial list
-   scan with no probing of any kind (see "Selection"), so an `api.yaml` with every entry
-   disabled fails fast without first paying for a potentially large diff.
+5. **Tool/API selection** — the first `enabled` entry in `api.yaml`, or, if `--tool
+   <NAME>` or `--interactive` was given, the entry that names or interactively selects
+   (exit code 6 if none are enabled and no `--tool`/`--interactive` override applies, or
+   if `--tool <NAME>` matched no entry; exit code 14 if `--interactive`'s prompt was
+   cancelled — see "Selection"). This runs before diff generation: it's a trivial list
+   scan (or a stdin prompt) with no probing of any kind, so a failure here — an
+   `api.yaml` with every entry disabled, an unmatched `--tool` name, or a cancelled
+   `--interactive` prompt — fails fast without first paying for a potentially large diff.
 6. **Diff generation** — for jj with `--include`/`--exclude`, first running the `jj diff
    --summary` enumeration call (exit code 7 if this subprocess itself fails, see "Diff
    scope resolution"); then resolving `--include`/`--exclude` against the enumerated
@@ -972,7 +1035,7 @@ before 15 in the table.
 | 3 | `--gen-config` failed — could not create the config directory (the default described under `--config` in Flags, or the directory given via `--config`) or write `prompts.yaml`/`api.yaml` (e.g. permission denied, disk full, path exists as a non-directory) |
 | 4 | Not a git or jj repository |
 | 5 | Config error — `api.yaml`/`prompts.yaml` missing, unreadable (e.g. permission denied), fails to parse, fails validation (including a duplicate `name` across `api.yaml` entries), references an unknown prompt, or `api.yaml` is an empty list; looked up in the config directory (the default described under `--config` in Flags, or the directory given via `--config`) |
-| 6 | No enabled tool/API — every `api.yaml` entry is disabled |
+| 6 | Tool/API selection failed — every `api.yaml` entry is disabled, or `--tool <NAME>` matched no entry (see "Selection") |
 | 7 | Diff generation failed — the underlying `git diff`/`jj diff` invocation itself errored; for jj with `--include`/`--exclude` this also covers the `jj diff --summary` enumeration call failing (see "Diff scope resolution") |
 | 8 | Nothing to diff — no staged changes (git), or an empty working-copy diff (jj) after applying `--include`/`--exclude` |
 | 9 | API key resolution failed |
@@ -980,7 +1043,7 @@ before 15 in the table.
 | 11 | Malformed response — `openai_api` only: the response could not be parsed, or parsed but missing the expected message content. Not applicable to `agent_cli`, whose output is raw stdout text; a bad `agent_cli` result surfaces as exit code 10 (non-zero exit) or exit code 15 (blank result), never 11. |
 | 12 | Editor unavailable — `$EDITOR` is set but doesn't resolve to an executable, or `$EDITOR` is unset and none of `nvim`/`vim`/`vi` are found on `$PATH` |
 | 13 | Editor aborted — `$EDITOR` (or the `nvim`/`vim`/`vi` fallback) exited with a non-zero status. The temp file's content is not read, and nothing is committed, regardless of what was saved before the editor exited. |
-| 14 | Aborted — the user canceled the jj-command picker (EOF on stdin) without selecting a command. Nothing is committed. |
+| 14 | Aborted — an interactive stdin picker was cancelled (EOF before a valid selection): either the `--interactive` tool picker at stage 5 (see "Selection"), or the jj-command picker at stage 8 (see "jj commit commands"). In the stage-8 case, nothing is committed. |
 | 15 | Empty commit message — blank after the applicable check (see "Message pre-population and cleanup"): under `--dry-run`, the tool/API response — after the response-cleanup pass (see "Response cleanup") — is empty or all whitespace, checked immediately; otherwise, the `$EDITOR`-saved file is blank after cleanup, checked after `$EDITOR` closes, since the user may have written one in over a blank generation. |
 | 16 | Commit failed — `git commit` / `jj commit`\|`describe`\|`split` invocation failed |
 | 17 | Temp file creation/write failed — creating the `$EDITOR` temp file (e.g. `tempfile::Builder::new().prefix("CCM_EDITMSG_").tempfile_in(...)` erroring because the OS temp directory is unwritable or the disk is full) or writing the pre-populated content into it failed. Falls between exit codes 12 and 13 in the pipeline (see "Check order" above); listed here, out of numeric sequence, to avoid renumbering 13–16. |

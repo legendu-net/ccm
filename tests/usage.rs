@@ -59,6 +59,87 @@ fn gen_config_combined_with_config_is_allowed_shapewise() {
 }
 
 #[test]
+fn gen_config_with_list_tools_is_a_usage_error() {
+    let fx = Fixture::new();
+    fx.ccm()
+        .args(["--gen-config", "--list-tools"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn gen_config_with_tool_is_a_usage_error() {
+    let fx = Fixture::new();
+    fx.ccm()
+        .args(["--gen-config", "--tool", "x"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn gen_config_with_interactive_is_a_usage_error() {
+    let fx = Fixture::new();
+    fx.ccm()
+        .args(["--gen-config", "--interactive"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn tool_and_interactive_together_is_a_usage_error() {
+    let fx = Fixture::new();
+    fx.ccm()
+        .args(["--tool", "x", "--interactive"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn list_tools_with_dry_run_is_a_usage_error() {
+    let fx = Fixture::new();
+    fx.ccm()
+        .args(["--list-tools", "--dry-run"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn list_tools_with_tool_is_a_usage_error() {
+    let fx = Fixture::new();
+    fx.ccm()
+        .args(["--list-tools", "--tool", "x"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn list_tools_with_interactive_is_a_usage_error() {
+    let fx = Fixture::new();
+    fx.ccm()
+        .args(["--list-tools", "--interactive"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn list_tools_combined_with_config_is_allowed_shapewise() {
+    let fx = Fixture::new();
+    fx.write_valid_config();
+    fx.ccm()
+        .args(["--list-tools", "--config"])
+        .arg(fx.config_dir())
+        .assert()
+        .code(0);
+}
+
+#[test]
 fn unknown_flag_is_a_clap_usage_error_with_exit_code_2() {
     // Pins clap's own default error exit code, since ccm relies on it matching the
     // spec's usage-error code without any extra wiring.

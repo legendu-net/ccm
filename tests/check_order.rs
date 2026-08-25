@@ -77,6 +77,36 @@ fn repo_dependent_usage_beats_missing_config_jj_repo_with_git_flag() {
 }
 
 #[test]
+fn list_tools_outside_any_repo_beats_repo_detection() {
+    // --list-tools short-circuits like --gen-config: it succeeds even with no repo at
+    // all, since it only needs a loadable config.
+    let fx = Fixture::new();
+    fx.write_config(
+        "- name: a\n  type: openai_api\n  prompt: default\n  base_url: http://x\n  model: m\n  api_key:\n    env: K\n",
+        "default:\n  template: x\n",
+    );
+    fx.ccm()
+        .args(["--list-tools", "--config"])
+        .arg(fx.config_dir())
+        .assert()
+        .code(0);
+}
+
+#[test]
+fn config_load_beats_an_unknown_tool_name() {
+    // Malformed api.yaml (stage 4) vs. a --tool name that would otherwise fail
+    // selection (stage 5) — the config error wins since selection never runs.
+    let fx = Fixture::new();
+    fx.init_git();
+    fx.write_config("not: [valid\n", "default:\n  template: x\n");
+    fx.ccm()
+        .args(["--tool", "no-such-tool", "--config"])
+        .arg(fx.config_dir())
+        .assert()
+        .code(5);
+}
+
+#[test]
 fn config_load_beats_selection() {
     // Malformed api.yaml (stage 4) vs. every entry disabled — can't even get to
     // stage 5 without a config that parses.

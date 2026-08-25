@@ -515,6 +515,50 @@ or re-resolve anything at commit time to guard against this — the same
 time-of-check-to-time-of-use exposure plain `git commit -e`/`jj describe` already have,
 not a new risk `ccm` introduces.
 
+### Response cleanup
+
+Immediately after stage 7 (Generation) gets a response back from the selected tool/API,
+and before that response is used for anything else — printed under `--dry-run`, or
+pre-populated into the `$EDITOR` temp file (see "Message pre-population and cleanup"
+below) — `ccm` runs it through one cleanup pass: it strips a single Markdown code fence
+wrapping the whole response, then a single pair of matching quotation marks wrapping the
+whole response or just its first line. Some LLMs answer with the message inside a
+```…``` block, or as a quoted string (e.g. `"feat: add x"`), regardless of what the
+prompt asks for; centralizing this cleanup here means every caller — the default
+`$EDITOR` flow, `--dry-run`, and any other consumer of `ccm`'s output — gets it for free
+instead of having to reimplement the same cleanup itself (this used to live in the
+Neovim wrapper described in Goal, ad hoc, before the fundamental generation logic moved
+into `ccm`).
+
+- Code fence: the response's first line must be a bare opening fence — a run of at least
+    3 backticks, optionally followed by a language tag, and nothing else (a line with
+    text after the backticks, e.g. "```feat: add x", is the message itself, not a
+    wrapper) — and the first following line that's a bare closing fence — a run of at
+    least as many backticks, and nothing else — must be the response's very last line. If
+    a closing fence appears earlier, the response holds other content or additional code
+    blocks rather than one wrapping fence, and is left unchanged; same if there's no
+    closing fence at all, or the first line isn't a bare opening fence.
+- Quotation marks: straight quotes (`"`, `'`, `` ` ``) and typographic "smart" quotes
+    (`“ ”`, `‘ ’`) are recognized. Only a genuinely enclosing pair is stripped — one whose
+    delimiters do not reappear inside — so an apostrophe within the text (e.g. `fix:
+    don't crash`) or two separate quoted spans (e.g. `"foo" and "bar"`) are left alone.
+    The whole response is tried first; if that doesn't unwrap, just its first line is
+    tried, so a quoted subject with an unquoted body is still cleaned up.
+
+This pass runs unconditionally, in both `--dry-run` and the default `$EDITOR` flow alike
+— a fenced or quoted response is equally unwanted either way, and it runs before the
+exit-code-15 blank check either mode applies (a response that's exactly an empty fenced
+block, e.g. "``` ```", cleans down to blank and is correctly treated as one). When
+neither transformation applies, the response is returned completely unchanged, byte for
+byte — not even trimmed — which is what keeps `--dry-run`'s stdout output exactly
+matching the tool/API's own response whenever no cleanup was actually needed. When
+something *is* stripped, the result ends up trimmed of surrounding whitespace as a side
+effect of extracting it from around the fence/quotes.
+
+This step is orthogonal to the `#CCM: `-comment cleanup described next: that one strips
+scaffolding `ccm` itself writes into the `$EDITOR` temp file, while this one cleans up
+the tool/API's own response before it ever reaches either destination.
+
 ### Message pre-population and cleanup
 
 The temp file `ccm` opens in `$EDITOR` is pre-populated with the generated message (if
@@ -553,14 +597,15 @@ to start with the literal `#CCM: ` prefix is stripped like any other, with no wa
 express a literal one — an accepted limitation, the same class of risk `git` itself
 accepts with plain `#` comment lines, not an oversight.
 
-This cleanup step does not apply under `--dry-run`: there's no `#CCM: ` comment block to
-strip in the first place (that scaffolding only ever gets written into the `$EDITOR` temp
-file), so `ccm` prints the tool/API's raw response to stdout exactly as returned, with no
-stripping or trimming of any kind. The exit-code-15 blank check still applies under
-`--dry-run` — a response that is empty or all whitespace is blank — but that check only
-decides whether to print at all; it never alters what gets printed. Since there's no
-editor to give the user a chance to fix up a blank response, that check fails immediately
-with the same code.
+This `#CCM: `-comment cleanup step does not apply under `--dry-run`: there's no such
+comment block to strip in the first place (that scaffolding only ever gets written into
+the `$EDITOR` temp file), so `ccm` prints stage 7's already-cleaned response (see
+"Response cleanup" above) to stdout exactly as `generation::generate` returned it, with
+no further stripping or trimming of any kind. The exit-code-15 blank check still applies
+under `--dry-run` — a response that is empty or all whitespace, after the response-cleanup
+pass, is blank — but that check only decides whether to print at all; it never alters what
+gets printed. Since there's no editor to give the user a chance to fix up a blank
+response, that check fails immediately with the same code.
 
 ### Progress logging
 
@@ -579,9 +624,10 @@ never ends up mixed into it even when stdout is piped/captured. Roughly, in orde
 - `Diff generated by: <command>` — once it succeeds.
 - `Generating commit message using <name> (<model>)…` — before calling the selected
     `api.yaml` entry.
-- `Generated empty message using <name> (<model>)` — if the tool/API returns a blank
-    result (see exit code 15).
-- `Commit message generated by <name> (<model>)` — once a non-blank message comes back.
+- `Generated empty message using <name> (<model>)` — if the tool/API's response, after
+    the response-cleanup pass (see "Response cleanup" below), is blank (see exit code 15).
+- `Commit message generated by <name> (<model>)` — once a non-blank cleaned message comes
+    back.
 - `Committing using: <command>` — default (non-`--dry-run`) mode only, once `$EDITOR`
     closes with a non-blank message: before running the `git commit`/`jj
     commit`\|`describe`\|`split` invocation (see "git commit"/"jj commit commands").
@@ -888,7 +934,9 @@ later stages are never reached:
    the final `git diff`/`jj diff` invocation (exit code 7 as well) and confirming the
    result is non-empty (exit code 8).
 7. **Generation** — API key resolution (exit code 9), the tool/API call itself (exit
-   code 10), and response parsing (exit code 11).
+   code 10), response parsing (exit code 11), and the response-cleanup pass (see
+   "Response cleanup") — the last of which cannot itself fail, only change what a later
+   blank check (exit code 15, stage 8) sees.
 8. **Editor & commit** — under `--dry-run`, this stage is just the empty-message check
    (exit code 15) — no editor, picker, or commit ever runs. Otherwise: `$EDITOR`/fallback
    resolution (exit code 12), creating and pre-populating the temp file (exit code 17),
@@ -933,7 +981,7 @@ before 15 in the table.
 | 12 | Editor unavailable — `$EDITOR` is set but doesn't resolve to an executable, or `$EDITOR` is unset and none of `nvim`/`vim`/`vi` are found on `$PATH` |
 | 13 | Editor aborted — `$EDITOR` (or the `nvim`/`vim`/`vi` fallback) exited with a non-zero status. The temp file's content is not read, and nothing is committed, regardless of what was saved before the editor exited. |
 | 14 | Aborted — the user canceled the jj-command picker (EOF on stdin) without selecting a command. Nothing is committed. |
-| 15 | Empty commit message — blank after the applicable check (see "Message pre-population and cleanup"): under `--dry-run`, the raw tool/API response is empty or all whitespace, checked immediately; otherwise, the `$EDITOR`-saved file is blank after cleanup, checked after `$EDITOR` closes, since the user may have written one in over a blank generation. |
+| 15 | Empty commit message — blank after the applicable check (see "Message pre-population and cleanup"): under `--dry-run`, the tool/API response — after the response-cleanup pass (see "Response cleanup") — is empty or all whitespace, checked immediately; otherwise, the `$EDITOR`-saved file is blank after cleanup, checked after `$EDITOR` closes, since the user may have written one in over a blank generation. |
 | 16 | Commit failed — `git commit` / `jj commit`\|`describe`\|`split` invocation failed |
 | 17 | Temp file creation/write failed — creating the `$EDITOR` temp file (e.g. `tempfile::Builder::new().prefix("CCM_EDITMSG_").tempfile_in(...)` erroring because the OS temp directory is unwritable or the disk is full) or writing the pre-populated content into it failed. Falls between exit codes 12 and 13 in the pipeline (see "Check order" above); listed here, out of numeric sequence, to avoid renumbering 13–16. |
 

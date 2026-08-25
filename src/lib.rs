@@ -7,6 +7,7 @@
 //! isolation from any repo/network/subprocess.
 
 pub mod backend;
+pub mod cleanup;
 pub mod cli;
 pub mod commit;
 pub mod config;

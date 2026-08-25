@@ -94,13 +94,16 @@ pub fn run(
         stderr,
     )?;
 
-    // Stage 8. Under --dry-run: the empty-message check applies immediately (there's
-    // no editor to give the user a chance to fix up a blank response), and the raw
-    // response is printed to stdout exactly as returned — no stripping, trimming, or
-    // added trailing newline; --dry-run never commits. Otherwise: the full $EDITOR
-    // flow to a cleaned, non-blank message, then straight to `git commit` or the jj
-    // commit-command picker (never shown for a message that's about to be discarded
-    // as blank, since it only runs once the message is already confirmed non-blank).
+    // Stage 8. `message` has already been through stage 7's response cleanup
+    // (`cleanup::clean_message` — see generation.rs), so there's no further stripping
+    // to apply here. Under --dry-run: the empty-message check applies immediately
+    // (there's no editor to give the user a chance to fix up a blank response), and the
+    // cleaned response is printed to stdout exactly as `generation::generate` returned
+    // it — no further stripping, trimming, or added trailing newline; --dry-run never
+    // commits. Otherwise: the full $EDITOR flow to a cleaned, non-blank message, then
+    // straight to `git commit` or the jj commit-command picker (never shown for a
+    // message that's about to be discarded as blank, since it only runs once the
+    // message is already confirmed non-blank).
     if cli.dry_run {
         if message.trim().is_empty() {
             return Err(EditorError::BlankMessage.into());

@@ -1,12 +1,15 @@
 //! Stage 7 of the check-order pipeline: message generation (prd.md "Selection" /
-//! Progress logging). Dispatches to the selected entry's backend and logs the
-//! surrounding progress lines; the blank-message hard failure (exit 15) is a stage-8
-//! concern applied differently by `--dry-run` vs. the default editor flow, so this
-//! module only logs whether the *raw* result was blank and hands it back unchanged.
+//! "Response cleanup" / Progress logging). Dispatches to the selected entry's backend,
+//! applies the response-cleanup pass (`cleanup::clean_message` — strips a wrapping code
+//! fence, then a wrapping pair of quotation marks), and logs the surrounding progress
+//! lines. The blank-message hard failure (exit 15) is a stage-8 concern applied
+//! differently by `--dry-run` vs. the default editor flow, so this module only logs
+//! whether the *cleaned* result was blank and hands it back.
 
 use crate::backend::MessageGenerator;
 use crate::backend::agent_cli::AgentCliGenerator;
 use crate::backend::openai::OpenAiGenerator;
+use crate::cleanup;
 use crate::config::model::{Entry, EntryKind, Prompts};
 use crate::env::Environment;
 use crate::error::CcmError;
@@ -56,6 +59,8 @@ pub fn generate(
             AgentCliGenerator::new(inner, cwd).generate(&resolved, diff, stderr)
         }
     }?;
+
+    let message = cleanup::clean_message(&message);
 
     if message.trim().is_empty() {
         let _ = progress::generated_empty_message(stderr, &entry.name, model);

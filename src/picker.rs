@@ -63,8 +63,12 @@ pub enum PickerError {
 }
 
 /// Runs the picker to a selection: prints the two `choices` to `writer` as `0) jj
-/// commit` / `1) jj describe|split`, reads a line from `reader`, and repeats on any
-/// invalid (non-`"0"`/`"1"`) input.
+/// commit` / `1) jj describe|split` (marking whichever index `default` names with a
+/// trailing `  (default)`), reads a line from `reader`, and repeats on any invalid
+/// (non-`"0"`/`"1"`) input — except a blank or all-whitespace line, which selects
+/// `choices[default]` immediately when `default` is `Some`. True EOF is unaffected by
+/// `default`: it's checked first and always cancels, even with a default set, since it
+/// signals a closed/non-interactive stdin rather than the user pressing Enter.
 ///
 /// # Errors
 /// [`PickerError::Cancelled`] on EOF without ever selecting a valid index;
@@ -73,10 +77,17 @@ pub fn prompt(
     reader: &mut (impl BufRead + ?Sized),
     writer: &mut (impl Write + ?Sized),
     choices: &[JjCommitCommand; 2],
+    default: Option<usize>,
 ) -> Result<JjCommitCommand, PickerError> {
     loop {
-        let _ = writeln!(writer, "0) {}", label(choices[0]));
-        let _ = writeln!(writer, "1) {}", label(choices[1]));
+        for (index, choice) in choices.iter().enumerate() {
+            let suffix = if default == Some(index) {
+                "  (default)"
+            } else {
+                ""
+            };
+            let _ = writeln!(writer, "{index}) {}{suffix}", label(*choice));
+        }
 
         let mut line = String::new();
         let bytes_read = reader.read_line(&mut line).map_err(PickerError::Io)?;
@@ -86,7 +97,13 @@ pub fn prompt(
 
         match interpret(&line) {
             PickerInput::Chosen(index) => return Ok(choices[index]),
-            PickerInput::Retry => {}
+            PickerInput::Retry => {
+                if let Some(d) = default
+                    && line.trim().is_empty()
+                {
+                    return Ok(choices[d]);
+                }
+            }
         }
     }
 }
@@ -117,10 +134,14 @@ pub fn interpret_index(line: &str, count: usize) -> PickerInput {
 }
 
 /// The `--interactive` tool picker: an arbitrary-length numbered-menu variant of
-/// [`prompt`]. Prints each of `lines` as `N) <line>`, then a `Select a tool [0-N]: `
-/// prompt with no trailing newline (flushed so it's visible before `reader` blocks), and
-/// reprints the whole menu on any invalid input — same EOF-is-[`PickerError::Cancelled`]
-/// / IO-error-is-[`PickerError::Io`] split as [`prompt`]. `lines` must be non-empty.
+/// [`prompt`]. Prints each of `lines` as `N) <line>` (the `(default)` marker, if any, is
+/// already baked into the relevant line by `config::listing::lines` — this function adds
+/// no marker of its own), then a `Select a tool [0-N]: ` prompt with no trailing newline
+/// (flushed so it's visible before `reader` blocks), and reprints the whole menu on any
+/// invalid input — except a blank or all-whitespace line, which selects `default`
+/// immediately when it's `Some`. Same EOF-is-[`PickerError::Cancelled`] (unaffected by
+/// `default`, same reasoning as [`prompt`]) / IO-error-is-[`PickerError::Io`] split as
+/// [`prompt`]. `lines` must be non-empty.
 ///
 /// # Errors
 /// [`PickerError::Cancelled`] on EOF without ever selecting a valid index;
@@ -129,6 +150,7 @@ pub fn prompt_index(
     reader: &mut (impl BufRead + ?Sized),
     writer: &mut (impl Write + ?Sized),
     lines: &[String],
+    default: Option<usize>,
 ) -> Result<usize, PickerError> {
     let last = lines.len().saturating_sub(1);
     loop {
@@ -146,7 +168,13 @@ pub fn prompt_index(
 
         match interpret_index(&line, lines.len()) {
             PickerInput::Chosen(index) => return Ok(index),
-            PickerInput::Retry => {}
+            PickerInput::Retry => {
+                if let Some(d) = default
+                    && line.trim().is_empty()
+                {
+                    return Ok(d);
+                }
+            }
         }
     }
 }
@@ -196,7 +224,7 @@ mod tests {
     fn prompt_selects_a_valid_first_answer() {
         let mut input = Cursor::new(b"0\n".to_vec());
         let mut output = Vec::new();
-        let picked = prompt(&mut input, &mut output, &choices(false)).unwrap();
+        let picked = prompt(&mut input, &mut output, &choices(false), None).unwrap();
         assert_eq!(picked, JjCommitCommand::Commit);
         let printed = String::from_utf8(output).unwrap();
         assert_eq!(printed, "0) jj commit\n1) jj describe\n");
@@ -206,15 +234,16 @@ mod tests {
     fn prompt_selects_index_one() {
         let mut input = Cursor::new(b"1\n".to_vec());
         let mut output = Vec::new();
-        let picked = prompt(&mut input, &mut output, &choices(true)).unwrap();
+        let picked = prompt(&mut input, &mut output, &choices(true), None).unwrap();
         assert_eq!(picked, JjCommitCommand::Split);
     }
 
     #[test]
     fn prompt_reprints_choices_and_retries_on_invalid_input() {
+        // With no default set, a blank line is just as invalid as "x" — both retry.
         let mut input = Cursor::new(b"x\n\n0\n".to_vec());
         let mut output = Vec::new();
-        let picked = prompt(&mut input, &mut output, &choices(false)).unwrap();
+        let picked = prompt(&mut input, &mut output, &choices(false), None).unwrap();
         assert_eq!(picked, JjCommitCommand::Commit);
         let printed = String::from_utf8(output).unwrap();
         // Printed once per attempt: invalid "x", blank, then the winning "0" — three
@@ -223,10 +252,57 @@ mod tests {
     }
 
     #[test]
+    fn prompt_blank_input_selects_the_given_default() {
+        let mut input = Cursor::new(b"\n".to_vec());
+        let mut output = Vec::new();
+        let picked = prompt(&mut input, &mut output, &choices(true), Some(1)).unwrap();
+        assert_eq!(picked, JjCommitCommand::Split);
+    }
+
+    #[test]
+    fn prompt_blank_input_without_a_default_still_retries() {
+        let mut input = Cursor::new(b"\n0\n".to_vec());
+        let mut output = Vec::new();
+        let picked = prompt(&mut input, &mut output, &choices(false), None).unwrap();
+        assert_eq!(picked, JjCommitCommand::Commit);
+        let printed = String::from_utf8(output).unwrap();
+        assert_eq!(printed.matches("0) jj commit").count(), 2);
+    }
+
+    #[test]
+    fn prompt_marks_the_default_choice_in_the_menu() {
+        let mut input = Cursor::new(b"0\n".to_vec());
+        let mut output = Vec::new();
+        prompt(&mut input, &mut output, &choices(false), Some(0)).unwrap();
+        let printed = String::from_utf8(output).unwrap();
+        assert_eq!(printed, "0) jj commit  (default)\n1) jj describe\n");
+    }
+
+    #[test]
+    fn prompt_prints_no_default_marker_when_default_is_none() {
+        let mut input = Cursor::new(b"0\n".to_vec());
+        let mut output = Vec::new();
+        prompt(&mut input, &mut output, &choices(false), None).unwrap();
+        let printed = String::from_utf8(output).unwrap();
+        assert!(!printed.contains("(default)"));
+    }
+
+    #[test]
     fn prompt_cancels_on_eof_without_a_valid_selection() {
         let mut input = Cursor::new(Vec::new());
         let mut output = Vec::new();
-        let result = prompt(&mut input, &mut output, &choices(false));
+        let result = prompt(&mut input, &mut output, &choices(false), None);
+        assert!(matches!(result, Err(PickerError::Cancelled)));
+    }
+
+    #[test]
+    fn prompt_eof_still_cancels_even_with_a_default_set() {
+        // True EOF (0 bytes read) is checked before any blank-line/default handling, so
+        // it must still cancel even when a default is available — EOF signals a closed/
+        // non-interactive stdin, not the user pressing Enter.
+        let mut input = Cursor::new(Vec::new());
+        let mut output = Vec::new();
+        let result = prompt(&mut input, &mut output, &choices(false), Some(0));
         assert!(matches!(result, Err(PickerError::Cancelled)));
     }
 
@@ -234,7 +310,7 @@ mod tests {
     fn prompt_cancels_on_eof_after_some_invalid_attempts() {
         let mut input = Cursor::new(b"garbage\n".to_vec());
         let mut output = Vec::new();
-        let result = prompt(&mut input, &mut output, &choices(false));
+        let result = prompt(&mut input, &mut output, &choices(false), None);
         assert!(matches!(result, Err(PickerError::Cancelled)));
     }
 
@@ -244,7 +320,7 @@ mod tests {
         // not be conflated with true EOF (which alone means "the user cancelled").
         let mut input = Cursor::new(vec![0xFF, 0xFE, b'\n']);
         let mut output = Vec::new();
-        let result = prompt(&mut input, &mut output, &choices(false));
+        let result = prompt(&mut input, &mut output, &choices(false), None);
         assert!(matches!(result, Err(PickerError::Io(_))));
     }
 
@@ -287,7 +363,7 @@ mod tests {
         let lines = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let mut input = Cursor::new(b"1\n".to_vec());
         let mut output = Vec::new();
-        let picked = prompt_index(&mut input, &mut output, &lines).unwrap();
+        let picked = prompt_index(&mut input, &mut output, &lines, None).unwrap();
         assert_eq!(picked, 1);
         let printed = String::from_utf8(output).unwrap();
         assert_eq!(printed, "0) a\n1) b\n2) c\nSelect a tool [0-2]: ");
@@ -295,13 +371,35 @@ mod tests {
 
     #[test]
     fn prompt_index_reprints_menu_and_retries_on_invalid_input() {
+        // With no default set, a blank line is just as invalid as "x" or an
+        // out-of-range index — all retry.
         let lines = vec!["a".to_string(), "b".to_string()];
         let mut input = Cursor::new(b"x\n\n5\n0\n".to_vec());
         let mut output = Vec::new();
-        let picked = prompt_index(&mut input, &mut output, &lines).unwrap();
+        let picked = prompt_index(&mut input, &mut output, &lines, None).unwrap();
         assert_eq!(picked, 0);
         let printed = String::from_utf8(output).unwrap();
         assert_eq!(printed.matches("0) a").count(), 4);
+    }
+
+    #[test]
+    fn prompt_index_blank_input_selects_the_given_default() {
+        let lines = vec!["a".to_string(), "b".to_string()];
+        let mut input = Cursor::new(b"\n".to_vec());
+        let mut output = Vec::new();
+        let picked = prompt_index(&mut input, &mut output, &lines, Some(1)).unwrap();
+        assert_eq!(picked, 1);
+    }
+
+    #[test]
+    fn prompt_index_blank_input_without_a_default_still_retries() {
+        let lines = vec!["a".to_string(), "b".to_string()];
+        let mut input = Cursor::new(b"\n0\n".to_vec());
+        let mut output = Vec::new();
+        let picked = prompt_index(&mut input, &mut output, &lines, None).unwrap();
+        assert_eq!(picked, 0);
+        let printed = String::from_utf8(output).unwrap();
+        assert_eq!(printed.matches("0) a").count(), 2);
     }
 
     #[test]
@@ -309,7 +407,16 @@ mod tests {
         let lines = vec!["a".to_string()];
         let mut input = Cursor::new(Vec::new());
         let mut output = Vec::new();
-        let result = prompt_index(&mut input, &mut output, &lines);
+        let result = prompt_index(&mut input, &mut output, &lines, None);
+        assert!(matches!(result, Err(PickerError::Cancelled)));
+    }
+
+    #[test]
+    fn prompt_index_eof_still_cancels_even_with_a_default_set() {
+        let lines = vec!["a".to_string()];
+        let mut input = Cursor::new(Vec::new());
+        let mut output = Vec::new();
+        let result = prompt_index(&mut input, &mut output, &lines, Some(0));
         assert!(matches!(result, Err(PickerError::Cancelled)));
     }
 
@@ -318,7 +425,7 @@ mod tests {
         let lines = vec!["a".to_string()];
         let mut input = Cursor::new(vec![0xFF, 0xFE, b'\n']);
         let mut output = Vec::new();
-        let result = prompt_index(&mut input, &mut output, &lines);
+        let result = prompt_index(&mut input, &mut output, &lines, None);
         assert!(matches!(result, Err(PickerError::Io(_))));
     }
 }

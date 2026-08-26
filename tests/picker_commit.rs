@@ -135,6 +135,10 @@ fn jj_scoped_picker_offers_commit_and_split_not_describe() {
 
 #[test]
 fn jj_picker_cancelled_on_eof_is_exit_14_and_nothing_is_committed() {
+    // True EOF (write_stdin("") closes stdin with zero bytes) is distinct from a blank
+    // line ending in Enter (which now selects the default, see
+    // jj_picker_blank_input_selects_commit_as_the_default) — this pins that EOF still
+    // cancels rather than silently falling back to the default.
     let fx = Fixture::new();
     fx.init_jj();
     ready(&fx);
@@ -159,6 +163,11 @@ fn jj_picker_cancelled_on_eof_is_exit_14_and_nothing_is_committed() {
 
 #[test]
 fn jj_picker_reprompts_on_invalid_input_before_succeeding() {
+    // "garbage" and "2" (out of range) are both genuinely invalid and must retry; a
+    // blank line is deliberately excluded here since it now selects the default
+    // (covered separately by jj_picker_blank_input_selects_commit_as_the_default) —
+    // asserting the final command is `jj describe` (from the trailing "1") confirms the
+    // picker actually reached and used that input rather than short-circuiting earlier.
     let fx = Fixture::new();
     fx.init_jj();
     ready(&fx);
@@ -168,9 +177,30 @@ fn jj_picker_reprompts_on_invalid_input_before_succeeding() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
-        .write_stdin("garbage\n\n1\n")
+        .write_stdin("garbage\n2\n1\n")
         .assert()
-        .code(0);
+        .code(0)
+        .stderr(predicate::str::contains("Committing using: jj describe"));
+}
+
+#[test]
+fn jj_picker_blank_input_selects_commit_as_the_default() {
+    let fx = Fixture::new();
+    fx.init_jj();
+    ready(&fx);
+    fx.write("a.txt", "hello\n");
+
+    fx.ccm()
+        .env("EDITOR", "ed")
+        .args(["--config"])
+        .arg(fx.config_dir())
+        .write_stdin("\n")
+        .assert()
+        .code(0)
+        .stderr(
+            predicate::str::contains("0) jj commit  (default)")
+                .and(predicate::str::contains("Committing using: jj commit")),
+        );
 }
 
 #[test]

@@ -13,6 +13,16 @@ fn type_label(kind: &EntryKind) -> &'static str {
     }
 }
 
+/// The index of the entry [`lines`] marks `(default)` — the same first-`enabled: true`
+/// entry `config::validate::select_first_enabled` would pick automatically. `None` if
+/// nothing is enabled. Shared with the `--interactive` picker's own default (see
+/// `pipeline.rs`), so the marker printed here and the entry a blank line at the prompt
+/// selects can never drift apart.
+#[must_use]
+pub fn default_index(entries: &[Entry]) -> Option<usize> {
+    entries.iter().position(|e| e.enabled)
+}
+
 /// One display line per entry, in `api.yaml` order: `name`, `type`, an
 /// `[enabled]`/`[disabled]` marker, and `(default)` on the first enabled entry — the one
 /// plain `ccm` (no `--tool`/`--interactive`) would select. Names are left-padded to the
@@ -24,7 +34,7 @@ pub fn lines(entries: &[Entry]) -> Vec<String> {
         .map(|e| e.name.chars().count())
         .max()
         .unwrap_or(0);
-    let default_index = entries.iter().position(|e| e.enabled);
+    let default_index = default_index(entries);
 
     entries
         .iter()
@@ -97,6 +107,18 @@ mod tests {
         let entries = vec![openai("a", false)];
         let lines = lines(&entries);
         assert!(!lines[0].contains("(default)"));
+    }
+
+    #[test]
+    fn default_index_matches_the_first_enabled_entry() {
+        let entries = vec![openai("a", false), openai("b", true), openai("c", true)];
+        assert_eq!(default_index(&entries), Some(1));
+    }
+
+    #[test]
+    fn default_index_is_none_when_nothing_is_enabled() {
+        let entries = vec![openai("a", false)];
+        assert_eq!(default_index(&entries), None);
     }
 
     #[test]

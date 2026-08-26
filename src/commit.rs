@@ -62,7 +62,9 @@ fn commit_jj(
     // is required to have matched at least one line).
     let scoped = !files.is_empty();
     let choices = picker::choices(scoped);
-    let picked = picker::prompt(stdin, stderr, &choices).map_err(picker::to_ccm_error)?;
+    // `jj commit` is always index 0 (see `choices`' own doc comment), so it's the
+    // picker's default: a blank line (Enter) selects it without the user typing "0".
+    let picked = picker::prompt(stdin, stderr, &choices, Some(0)).map_err(picker::to_ccm_error)?;
 
     let args = argv::jj_commit_command_args(picked, message, files);
     let command = argv::render_command("jj", &args);

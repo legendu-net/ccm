@@ -253,8 +253,10 @@ Flags:
     non-directory, etc.) is reported to stderr and exits with code 3 rather than
     partially succeeding silently.
 - `--list-tools` / `-l` — print every `api.yaml` entry (from the config directory resolved the
-    same way as above), one per line, in file order — name, `type`, and an
-    `[enabled]`/`[disabled]` marker — then exit with code 0. Like `--gen-config`, this
+    same way as above), one per line, in file order — name, `type`, an
+    `[enabled]`/`[disabled]` marker, and a `(default)` marker on the first `enabled: true`
+    entry (the one plain `ccm`, with no `--tool`/`--interactive`, would select) — then
+    exit with code 0. Like `--gen-config`, this
     short-circuits every later stage and does not require being run inside a git or jj
     repository; unlike `--gen-config`, it still goes through Config load & validation
     (exit code 5 on a malformed `prompts.yaml`/`api.yaml`), since there's nothing to list
@@ -755,12 +757,19 @@ prompt rather than a fuzzy-finder UI: `ccm` prints the two choices to stderr as 
 commit` and `1) jj describe` (or `1) jj split`, whichever applies), then reads a line
 from stdin. The line is trimmed of leading/trailing whitespace before being checked —
 so e.g. a trailing `\r` from a CRLF terminal, or an accidental leading/trailing space,
-doesn't turn a valid `0`/`1` into an invalid entry — and if the trimmed result is
-exactly `0` or `1` that selects the corresponding command; anything else (including a
-blank line, or a line that's all whitespace) reprints the two choices and re-prompts,
-except EOF (Ctrl-D) on stdin, which cancels the picker outright. If the user cancels — EOF without having entered a valid
-index — `ccm` aborts immediately — it does not fall back to any default jj command and
-does not commit — and exits with code 14.
+doesn't turn a valid `0`/`1` into an invalid entry — and if the trimmed result is exactly
+`0` or `1` that selects the corresponding command.
+
+`jj commit` (index 0) is always the picker's default, marked as such in the printed menu
+— `0) jj commit  (default)` — since it's the one choice that's always on offer regardless
+of scope (see the argument-template table above). A blank line (the user just pressing
+Enter, with no index typed) selects it directly, without needing to type `0`. Any other
+invalid input (anything that isn't exactly `0`, `1`, or blank — e.g. `2`, `y`) still
+reprints the two choices and re-prompts. True EOF (Ctrl-D) on stdin is a separate signal
+from a blank line and is unaffected by the default: it still cancels the picker outright
+regardless of whether a default is available. If the user cancels — EOF without having
+entered a valid index — `ccm` aborts immediately — a blank *line* would have selected the
+default, but EOF is not a blank line — and does not commit — and exits with code 14.
 
 ## Configuration
 
@@ -935,9 +944,15 @@ still tried, it's just chosen a different way.
     a selection failure (exit 6), same as "every entry disabled."
 - `--interactive` prints the same name/type/enabled listing `--list-tools` does, as a
     numbered stdin menu, and selects whichever entry the user picks — again regardless of
-    `enabled`. Cancelling the prompt (EOF on stdin before a valid choice) is exit 14, not
-    exit 6, since a tool *was* available to select — the user simply didn't finish picking
-    one (see "Interactive terminal requirement").
+    `enabled`. A blank line at the prompt (Enter with no index typed) selects the entry
+    marked `(default)` in that listing — the same one `select_first_enabled` would pick
+    automatically — without needing to type its number; when nothing is enabled there is
+    no `(default)` entry, so a blank line simply re-prompts there too, the same as any
+    other invalid input. Cancelling the prompt (EOF on stdin before a valid choice) is
+    exit 14, not exit 6, since a tool *was* available to select — the user simply didn't
+    finish picking one (see "Interactive terminal requirement"); EOF is a separate signal
+    from a blank line and is unaffected by the default — it still cancels even when one
+    is available.
 
 Either way, the name-uniqueness and prompt-reference validation above still runs first,
 unconditionally — a `--tool`/`--interactive` run is never let through with an

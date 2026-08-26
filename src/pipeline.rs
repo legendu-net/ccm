@@ -101,7 +101,12 @@ pub fn run(
         config::validate::select_by_name(&loaded.entries, name)?
     } else if cli.interactive {
         let lines = config::listing::lines(&loaded.entries);
-        let index = picker::prompt_index(stdin, stderr, &lines).map_err(picker::to_ccm_error)?;
+        // A blank line at the prompt selects the same entry the `(default)` marker
+        // above names — `None` when nothing is enabled, so a blank line just re-prompts
+        // in that case, same as any other invalid input.
+        let default = config::listing::default_index(&loaded.entries);
+        let index =
+            picker::prompt_index(stdin, stderr, &lines, default).map_err(picker::to_ccm_error)?;
         &loaded.entries[index]
     } else {
         config::validate::select_first_enabled(&loaded.entries)?

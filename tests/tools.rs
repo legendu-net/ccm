@@ -108,6 +108,9 @@ fn interactive_picks_the_second_entry() {
 
 #[test]
 fn interactive_reprompts_on_invalid_input_before_succeeding() {
+    // "garbage" and "99" (out of range) are both genuinely invalid and must retry; a
+    // blank line is deliberately excluded here since it now selects the default entry
+    // "a" (covered separately by interactive_blank_input_selects_the_default_tool).
     let fx = Fixture::new();
     fx.init_git();
     write_two_tool_config(&fx);
@@ -117,14 +120,61 @@ fn interactive_reprompts_on_invalid_input_before_succeeding() {
     fx.ccm()
         .args(["--interactive", "--dry-run", "--config"])
         .arg(fx.config_dir())
-        .write_stdin("garbage\n\n1\n")
+        .write_stdin("garbage\n99\n1\n")
         .assert()
         .code(0)
         .stdout("feat: from b\n");
 }
 
 #[test]
+fn interactive_blank_input_selects_the_default_tool() {
+    // "a" is the enabled/default entry (see write_two_tool_config); a blank line at the
+    // prompt selects it without the user typing "0".
+    let fx = Fixture::new();
+    fx.init_git();
+    write_two_tool_config(&fx);
+    fx.write("f.txt", "hello\n");
+    fx.stage("f.txt");
+
+    fx.ccm()
+        .args(["--interactive", "--dry-run", "--config"])
+        .arg(fx.config_dir())
+        .write_stdin("\n")
+        .assert()
+        .code(0)
+        .stdout("feat: from a\n")
+        .stderr(predicate::str::contains("(default)"));
+}
+
+#[test]
+fn interactive_blank_input_without_a_default_still_retries() {
+    // Every entry is disabled here, so there's no default — a blank line must still
+    // retry, and only an explicit index selects an entry.
+    let fx = Fixture::new();
+    fx.init_git();
+    fx.write_script("agent-a", "echo 'feat: from a'");
+    fx.write_config(
+        "- name: a\n  type: agent_cli\n  enabled: false\n  prompt: default\n  command: agent-a\n  model: m\n  args: []\n",
+        valid_prompts(),
+    );
+    fx.write("f.txt", "hello\n");
+    fx.stage("f.txt");
+
+    fx.ccm()
+        .args(["--interactive", "--dry-run", "--config"])
+        .arg(fx.config_dir())
+        .write_stdin("\n0\n")
+        .assert()
+        .code(0)
+        .stdout("feat: from a\n");
+}
+
+#[test]
 fn interactive_cancelled_on_eof_is_exit_14() {
+    // True EOF (write_stdin("") closes stdin with zero bytes) is distinct from a blank
+    // line ending in Enter (which now selects the default, see
+    // interactive_blank_input_selects_the_default_tool) — this pins that EOF still
+    // cancels rather than silently falling back to the default.
     let fx = Fixture::new();
     fx.init_git();
     write_two_tool_config(&fx);

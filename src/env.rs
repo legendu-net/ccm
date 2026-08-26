@@ -8,7 +8,7 @@
 //! `std::env::set_var` `unsafe`, and it would be racy under `cargo test`'s thread
 //! parallelism regardless.
 
-use std::io;
+use std::io::{self, IsTerminal};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +28,12 @@ pub trait Environment {
     /// and is executable; otherwise search `$PATH` in order for an executable of that
     /// name. Returns the resolved path, or `None` if nothing matched.
     fn find_program(&self, program: &str) -> Option<PathBuf>;
+
+    /// Whether stdin is attached to a real terminal — the message review prompt
+    /// (`picker::prompt_action`) uses this to decide whether it can read a single
+    /// keypress in raw mode, or must fall back to reading a whole line (piped stdin, a
+    /// non-interactive caller, or any of `tests/`'s subprocess runs).
+    fn stdin_is_terminal(&self) -> bool;
 }
 
 /// The real process environment, backed directly by `std::env`.
@@ -63,6 +69,10 @@ impl Environment for RealEnvironment {
             is_executable_file(&candidate).then_some(candidate)
         })
     }
+
+    fn stdin_is_terminal(&self) -> bool {
+        io::stdin().is_terminal()
+    }
 }
 
 /// A fully in-memory [`Environment`] for unit tests: no filesystem or real env access
@@ -74,6 +84,10 @@ pub struct FakeEnvironment {
     pub temp_dir: PathBuf,
     /// Bare program names resolvable via a `$PATH`-style lookup, in search order.
     pub path_programs: Vec<(String, PathBuf)>,
+    /// What [`Environment::stdin_is_terminal`] reports. Defaults to `false` — every
+    /// existing test drives `run()`/`edit_message()`/pickers over an in-memory
+    /// `Cursor`/`Vec<u8>`, never a real terminal.
+    pub stdin_is_terminal: bool,
 }
 
 impl FakeEnvironment {
@@ -84,6 +98,7 @@ impl FakeEnvironment {
             vars: std::collections::HashMap::new(),
             temp_dir: PathBuf::from("/tmp"),
             path_programs: Vec::new(),
+            stdin_is_terminal: false,
         }
     }
 
@@ -97,6 +112,12 @@ impl FakeEnvironment {
     pub fn with_program(mut self, name: &str, path: &str) -> Self {
         self.path_programs
             .push((name.to_string(), PathBuf::from(path)));
+        self
+    }
+
+    #[must_use]
+    pub fn with_stdin_is_terminal(mut self, value: bool) -> Self {
+        self.stdin_is_terminal = value;
         self
     }
 }
@@ -126,6 +147,10 @@ impl Environment for FakeEnvironment {
             .iter()
             .find(|(name, _)| name == program)
             .map(|(_, path)| path.clone())
+    }
+
+    fn stdin_is_terminal(&self) -> bool {
+        self.stdin_is_terminal
     }
 }
 

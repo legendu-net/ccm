@@ -162,7 +162,11 @@ fn scope_resolution_beats_api_key_resolution() {
 fn blank_message_never_reaches_the_jj_picker() {
     // A blank cleaned message (stage 8's empty-message check) must abort with exit 15
     // before the jj commit-command picker ever runs — the picker is never shown for a
-    // message that's about to be discarded.
+    // message that's about to be discarded. The generated message itself is non-blank
+    // (from write_valid_config's fake agent), so "e" explicitly selects edit at the
+    // message review prompt (prd.md "Message review prompt") — a blank line there
+    // would accept that non-blank message outright, never reaching the blanking editor
+    // at all.
     let fx = Fixture::new();
     fx.init_jj();
     fx.write_valid_config();
@@ -172,7 +176,7 @@ fn blank_message_never_reaches_the_jj_picker() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
-        .write_stdin("0\n")
+        .write_stdin("e\n")
         .assert()
         .code(15)
         .stderr(

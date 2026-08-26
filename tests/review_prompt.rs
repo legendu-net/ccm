@@ -1,0 +1,237 @@
+//! The message review prompt (prd.md "Message review prompt") through the real
+//! binary: regenerate/edit/accept, blank-generation's regenerate/edit-only variant,
+//! reprompting on invalid input, EOF cancellation (exit 14), and that `--dry-run` never
+//! shows it at all.
+//!
+//! Every test here drives the binary with piped stdin (`assert_cmd`'s `write_stdin`),
+//! which is never a real terminal — so `Environment::stdin_is_terminal` reports
+//! `false` and the prompt reads a whole line per attempt (the same line-mode fallback a
+//! piped/non-interactive caller gets in production). Raw single-keypress mode is only
+//! reachable from a genuine terminal and isn't exercised here (see the plan's manual
+//! verification steps).
+
+mod common;
+
+use common::Fixture;
+use predicates::prelude::*;
+use std::process::Command;
+
+fn last_commit_subject(fx: &Fixture) -> String {
+    let log = Command::new("git")
+        .args(["log", "-1", "--format=%s"])
+        .current_dir(fx.repo_dir())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&log.stdout).trim().to_string()
+}
+
+fn commit_count(fx: &Fixture) -> usize {
+    let log = Command::new("git")
+        .args(["log", "--oneline"])
+        .current_dir(fx.repo_dir())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&log.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+}
+
+/// A fake `$EDITOR` that copies the temp file's pre-populated content to `marker`
+/// before overwriting the temp file with a fixed, always-committable message —
+/// matching `tests/tools.rs`'s `install_capturing_editor`. `marker`'s presence alone
+/// proves `$EDITOR` actually ran (accept must never create it).
+fn install_capturing_editor(fx: &Fixture, marker: &std::path::Path) {
+    fx.write_script(
+        "ed",
+        &format!(
+            "cp \"$1\" {}\nprintf 'feat: edited\\n' > \"$1\"",
+            marker.display()
+        ),
+    );
+}
+
+/// A fake `agent_cli` whose message changes on its second invocation: `feat: first
+/// attempt`, then `feat: second attempt` on every call after that. `counter` tracks how
+/// many times it's run so far. Lets a regenerate test tell the two generations apart by
+/// their committed message, without a mock HTTP server.
+fn write_counting_agent(fx: &Fixture, counter: &std::path::Path) {
+    fx.write_script(
+        "ccm-test-agent",
+        &format!(
+            "n=$(cat {counter} 2>/dev/null || echo 0)\n\
+             n=$((n + 1))\n\
+             echo \"$n\" > {counter}\n\
+             if [ \"$n\" = \"1\" ]; then echo 'feat: first attempt'; else echo 'feat: second attempt'; fi",
+            counter = counter.display()
+        ),
+    );
+    fx.write_config(
+        "- name: a\n  type: agent_cli\n  prompt: default\n  command: ccm-test-agent\n  model: m\n  args: []\n",
+        "default:\n  template: write a commit message\n",
+    );
+}
+
+fn ready(fx: &Fixture) {
+    fx.init_git();
+    fx.write_valid_config();
+    fx.write("a.txt", "hello\n");
+    fx.stage("a.txt");
+}
+
+#[test]
+fn enter_accepts_without_ever_opening_the_editor() {
+    let fx = Fixture::new();
+    ready(&fx);
+    let marker = fx.tmp_dir().join("captured.txt");
+    install_capturing_editor(&fx, &marker);
+
+    fx.ccm()
+        .env("EDITOR", "ed")
+        .args(["--config"])
+        .arg(fx.config_dir())
+        .write_stdin("\n")
+        .assert()
+        .code(0)
+        .stderr(predicate::str::contains("[Space/Enter] accept"));
+
+    assert!(
+        !marker.exists(),
+        "accept must never invoke $EDITOR, but the capturing editor's marker exists"
+    );
+    assert_eq!(last_commit_subject(&fx), "feat: test commit message");
+}
+
+#[test]
+fn e_selects_edit_and_the_edited_message_is_committed() {
+    let fx = Fixture::new();
+    ready(&fx);
+    fx.write_script("ed", "printf 'feat: edited by hand\\n' > \"$1\"");
+
+    fx.ccm()
+        .env("EDITOR", "ed")
+        .args(["--config"])
+        .arg(fx.config_dir())
+        .write_stdin("e\n")
+        .assert()
+        .code(0);
+
+    assert_eq!(last_commit_subject(&fx), "feat: edited by hand");
+}
+
+#[test]
+fn r_regenerates_then_accepts_the_second_message() {
+    let fx = Fixture::new();
+    fx.init_git();
+    let counter = fx.tmp_dir().join("agent-calls.txt");
+    write_counting_agent(&fx, &counter);
+    fx.write("a.txt", "hello\n");
+    fx.stage("a.txt");
+    // Never actually invoked ("\n" after "r\n" accepts before $EDITOR would run), but
+    // resolvable so a stray Edit action wouldn't hang the test.
+    fx.write_script("ed", "exit 0");
+
+    let assert = fx
+        .ccm()
+        .env("EDITOR", "ed")
+        .args(["--config"])
+        .arg(fx.config_dir())
+        .write_stdin("r\n\n")
+        .assert()
+        .code(0);
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert_eq!(
+        stderr.matches("Commit message generated by a").count(),
+        2,
+        "expected two generations (initial + regenerate) in:\n{stderr}"
+    );
+    assert_eq!(last_commit_subject(&fx), "feat: second attempt");
+}
+
+#[test]
+fn eof_cancels_with_exit_14_and_nothing_is_committed() {
+    let fx = Fixture::new();
+    ready(&fx);
+
+    fx.ccm()
+        .env("EDITOR", "ed")
+        .args(["--config"])
+        .arg(fx.config_dir())
+        .write_stdin("")
+        .assert()
+        .code(14)
+        .stdout(predicate::str::is_empty());
+
+    assert_eq!(commit_count(&fx), 0);
+}
+
+#[test]
+fn invalid_input_reprints_the_prompt_before_accepting() {
+    let fx = Fixture::new();
+    ready(&fx);
+
+    let assert = fx
+        .ccm()
+        .env("EDITOR", "ed")
+        .args(["--config"])
+        .arg(fx.config_dir())
+        .write_stdin("z\n\n")
+        .assert()
+        .code(0);
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert_eq!(
+        stderr.matches("[Space/Enter] accept").count(),
+        2,
+        "expected one reprint for the invalid \"z\", then the winning blank line, in:\n{stderr}"
+    );
+    assert_eq!(last_commit_subject(&fx), "feat: test commit message");
+}
+
+#[test]
+fn blank_generation_offers_no_accept_and_a_blank_line_edits() {
+    // The fake agent prints nothing, so generation is blank; the review prompt must
+    // offer only regenerate/edit (no "accept" text at all), and a blank line there
+    // selects edit — not a no-op "commit nothing", which would be nonsensical.
+    let fx = Fixture::new();
+    fx.init_git();
+    fx.write_script("ccm-test-agent", "true");
+    fx.write_config(
+        "- name: a\n  type: agent_cli\n  prompt: default\n  command: ccm-test-agent\n  model: m\n  args: []\n",
+        "default:\n  template: write a commit message\n",
+    );
+    fx.write("a.txt", "hello\n");
+    fx.stage("a.txt");
+    fx.write_script("ed", "printf 'feat: written from scratch\\n' > \"$1\"");
+
+    let assert = fx
+        .ccm()
+        .env("EDITOR", "ed")
+        .args(["--config"])
+        .arg(fx.config_dir())
+        .write_stdin("\n")
+        .assert()
+        .code(0);
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        !stderr.contains("accept"),
+        "a blank generation must not offer accept in:\n{stderr}"
+    );
+    assert_eq!(last_commit_subject(&fx), "feat: written from scratch");
+}
+
+#[test]
+fn dry_run_never_shows_the_review_prompt() {
+    let fx = Fixture::new();
+    ready(&fx);
+
+    fx.ccm()
+        .args(["--dry-run", "--config"])
+        .arg(fx.config_dir())
+        .assert()
+        .code(0)
+        .stdout("feat: test commit message\n")
+        .stderr(predicate::str::contains("accept").not());
+}

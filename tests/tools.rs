@@ -5,6 +5,11 @@
 //! sentinel, and the tool picker default mode shows whenever the first-enabled rule
 //! can't resolve on its own (selection, reprompting on invalid input, and exit 14 on
 //! cancellation).
+//!
+//! Every generated message here is non-blank, so once tool selection is settled, an
+//! extra `"e\n"` is needed to get past the message review prompt (prd.md "Message
+//! review prompt") and actually reach the (fake, capturing) `$EDITOR` these tests
+//! inspect — a blank line there would accept the message outright and skip `$EDITOR`.
 
 mod common;
 
@@ -158,7 +163,7 @@ fn no_tool_flag_picker_selects_the_second_entry() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
-        .write_stdin("1\n")
+        .write_stdin("1\ne\n")
         .assert()
         .code(0)
         .stderr(predicate::str::contains("Select a tool"));
@@ -186,7 +191,7 @@ fn empty_tool_flag_forces_the_picker_onto_a_disabled_entry_in_default_mode() {
         .env("EDITOR", "ed")
         .args(["--tool", "", "--config"])
         .arg(fx.config_dir())
-        .write_stdin("1\n")
+        .write_stdin("1\ne\n")
         .assert()
         .code(0)
         .stderr(predicate::str::contains("Select a tool"));
@@ -211,7 +216,7 @@ fn picker_reprompts_on_invalid_input_before_succeeding() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
-        .write_stdin("garbage\n99\n1\n")
+        .write_stdin("garbage\n99\n1\ne\n")
         .assert()
         .code(0);
     let captured = std::fs::read_to_string(&marker).unwrap();
@@ -234,7 +239,7 @@ fn picker_blank_input_selects_the_default_tool() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
-        .write_stdin("\n")
+        .write_stdin("\ne\n")
         .assert()
         .code(0)
         .stderr(predicate::str::contains("(default)"));
@@ -263,7 +268,7 @@ fn picker_blank_input_without_a_default_still_retries() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
-        .write_stdin("\n0\n")
+        .write_stdin("\n0\ne\n")
         .assert()
         .code(0);
     let captured = std::fs::read_to_string(&marker).unwrap();
@@ -294,8 +299,9 @@ fn picker_cancelled_on_eof_is_exit_14() {
 #[test]
 fn single_enabled_entry_selects_silently_in_default_mode() {
     // Exactly one entry enabled ("a"; "b" disabled): default mode must not show the
-    // picker at all, so EOF'd stdin doesn't cancel anything — it reaches the (fake)
-    // editor and commits using "a"'s message.
+    // tool picker at all, so its stdin's first line ("e\n") is read by the message
+    // review prompt instead, selecting edit and reaching the (fake) editor to commit
+    // using "a"'s message.
     let fx = Fixture::new();
     fx.init_git();
     write_two_tool_config(&fx);
@@ -308,7 +314,7 @@ fn single_enabled_entry_selects_silently_in_default_mode() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
-        .write_stdin("")
+        .write_stdin("e\n")
         .assert()
         .code(0)
         .stderr(predicate::str::contains("Select a tool").not());

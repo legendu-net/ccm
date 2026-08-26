@@ -1,10 +1,12 @@
-//! Plain numbered stdin pickers (prd.md, "jj commit commands"; "Selection"): the jj
-//! commit-command picker (never more than two choices) and default mode's tool picker
-//! (an arbitrary number of `api.yaml` entries, shown only when the choice is ambiguous)
-//! — both plain stdin prompts, so no fuzzy-finder crate is warranted (see "Preferences
-//! of Dependencies" #3).
+//! Plain stdin pickers (prd.md, "jj commit commands"; "Selection"; "Message review
+//! prompt"): the jj commit-command picker (never more than two choices), default
+//! mode's tool picker (an arbitrary number of `api.yaml` entries, shown only when the
+//! choice is ambiguous), and the message review prompt (regenerate/edit/accept, shown
+//! after every generation) — all plain stdin prompts, so no fuzzy-finder or TUI crate
+//! is warranted (see "Preferences of Dependencies" #3).
 
 use crate::error::{CcmError, PickerCancelled};
+use crate::term;
 use crate::vcs::argv::JjCommitCommand;
 use std::io::{BufRead, Write};
 
@@ -180,10 +182,155 @@ pub fn prompt_index(
     }
 }
 
+/// One action selected from the message review prompt (prd.md "Message review
+/// prompt"): [`ReviewAction::Regenerate`] re-runs stage 7 (generation) against the
+/// already-selected entry and already-computed diff; [`ReviewAction::Edit`] opens
+/// `$EDITOR` on the current message, same as today's fixed behavior;
+/// [`ReviewAction::Accept`] commits the current message as-is, skipping `$EDITOR`
+/// entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewAction {
+    Regenerate,
+    Edit,
+    Accept,
+}
+
+/// Interprets one byte of review-prompt input: `r`/`R` is always
+/// [`ReviewAction::Regenerate`]; `e`/`E` is always [`ReviewAction::Edit`]; a space or
+/// Enter (`\n`/`\r`) is the prompt's default action — [`ReviewAction::Accept`] when
+/// `allow_accept` (a non-blank generated message), or [`ReviewAction::Edit`] otherwise,
+/// since a blank generation has nothing worth accepting (see "Message review prompt").
+/// Any other byte is a retry (`None`).
+///
+/// Ctrl-D (`0x04`) is deliberately not classified here: unlike every other
+/// unrecognized byte, it doesn't mean "keep asking, try again" — it cancels the prompt
+/// outright, which is [`prompt_action`]'s job, not this pure classifier's.
+#[must_use]
+pub fn interpret_action(byte: u8, allow_accept: bool) -> Option<ReviewAction> {
+    match byte {
+        b'r' | b'R' => Some(ReviewAction::Regenerate),
+        b'e' | b'E' => Some(ReviewAction::Edit),
+        b' ' | b'\n' | b'\r' => Some(if allow_accept {
+            ReviewAction::Accept
+        } else {
+            ReviewAction::Edit
+        }),
+        _ => None,
+    }
+}
+
+fn print_action_menu(writer: &mut (impl Write + ?Sized), allow_accept: bool) {
+    if allow_accept {
+        let _ = write!(writer, "[R]egenerate  [E]dit  [Space/Enter] accept: ");
+    } else {
+        let _ = write!(writer, "[R]egenerate  [Space/Enter] edit: ");
+    }
+    let _ = writer.flush();
+}
+
+/// Reads and discards the remainder of the current line (up to and including the
+/// terminating `\n`, or EOF), one byte at a time. Only used in line mode (`raw ==
+/// false` in [`prompt_action`]): since a non-terminal stdin delivers a whole typed line
+/// at once regardless of which single byte we act on, this keeps every attempt —
+/// whether it selected a valid action or was a retry — consuming exactly one line, the
+/// same granularity [`prompt`]/[`prompt_index`] read at via `read_line`. Without this,
+/// a leftover `\n` (or trailing garbage) would be mistaken for the next prompt's own
+/// input, be it another attempt at this same prompt or the jj commit-command picker.
+fn drain_rest_of_line(
+    reader: &mut (impl BufRead + ?Sized),
+    first_byte: u8,
+) -> Result<(), PickerError> {
+    if first_byte == b'\n' {
+        return Ok(());
+    }
+    let mut buf = [0u8; 1];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => return Ok(()), // EOF mid-line: nothing left to drain.
+            Ok(_) => {
+                if buf[0] == b'\n' {
+                    return Ok(());
+                }
+            }
+            Err(err) => return Err(PickerError::Io(err)),
+        }
+    }
+}
+
+/// Runs the message review prompt (prd.md "Message review prompt") to a selection:
+/// prints `[R]egenerate  [E]dit  [Space/Enter] accept: ` (or, when `allow_accept` is
+/// `false` — the generated message is blank — `[R]egenerate  [Space/Enter] edit: `),
+/// reads a single byte, and repeats on any input [`interpret_action`] doesn't
+/// recognize.
+///
+/// When `raw` is `true`, stdin is put into raw terminal mode ([`term::RawGuard`]) for
+/// the read, so a single keypress selects an action with no Enter needed — the caller
+/// (`pipeline::run`) only passes `true` when `Environment::stdin_is_terminal` reports a
+/// real terminal, and `reader` is that same terminal's stdin in that case. When raw
+/// mode isn't actually engaged for the read — either `raw` is `false` (stdin isn't a
+/// real terminal — every integration test, and any piped caller), or `raw` is `true`
+/// but [`term::RawGuard::enable`] itself fails despite stdin reporting as a terminal —
+/// only the first byte of each line is inspected, and [`drain_rest_of_line`] discards
+/// the remainder — up to and including the terminating `\n`, or EOF — on every attempt,
+/// valid or not, so the next read of `reader` (a retry of this same prompt, or the jj
+/// commit-command picker) always starts at a clean line boundary; skipping this drain
+/// is only correct when raw mode genuinely suppressed canonical line buffering. A
+/// newline is written after a valid selection either way, since raw mode echoes
+/// nothing back to the terminal on its own.
+///
+/// EOF (zero bytes read) or a literal Ctrl-D byte (`0x04`) cancels immediately,
+/// regardless of `raw` — the same "the user didn't finish choosing" signal the other
+/// pickers treat as [`PickerError::Cancelled`].
+///
+/// # Errors
+/// [`PickerError::Cancelled`] on EOF or Ctrl-D before a valid selection;
+/// [`PickerError::Io`] if reading a byte fails for a reason other than EOF.
+pub fn prompt_action(
+    reader: &mut (impl BufRead + ?Sized),
+    writer: &mut (impl Write + ?Sized),
+    allow_accept: bool,
+    raw: bool,
+) -> Result<ReviewAction, PickerError> {
+    loop {
+        print_action_menu(writer, allow_accept);
+
+        let mut buf = [0u8; 1];
+        // Whether raw mode was actually engaged, not merely requested: if `raw` is
+        // true but `RawGuard::enable` itself fails (e.g. `tcgetattr`/`tcsetattr` erroring
+        // despite stdin reporting as a terminal), the terminal stays in canonical
+        // line-buffered mode, and skipping the drain below on `raw` alone would leave a
+        // trailing `\n` (or more) unconsumed, leaking into the next read.
+        let (bytes_read, raw_engaged) = {
+            let guard = raw
+                .then(|| term::RawGuard::enable(std::io::stdin()))
+                .flatten();
+            let raw_engaged = guard.is_some();
+            (reader.read(&mut buf).map_err(PickerError::Io)?, raw_engaged)
+        };
+        if bytes_read == 0 {
+            return Err(PickerError::Cancelled);
+        }
+        let byte = buf[0];
+
+        if !raw_engaged {
+            drain_rest_of_line(reader, byte)?;
+        }
+
+        if byte == 0x04 {
+            return Err(PickerError::Cancelled);
+        }
+
+        if let Some(action) = interpret_action(byte, allow_accept) {
+            let _ = writeln!(writer);
+            return Ok(action);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{Cursor, Read};
 
     #[test]
     fn scoped_offers_commit_and_split() {
@@ -427,6 +574,160 @@ mod tests {
         let mut input = Cursor::new(vec![0xFF, 0xFE, b'\n']);
         let mut output = Vec::new();
         let result = prompt_index(&mut input, &mut output, &lines, None);
+        assert!(matches!(result, Err(PickerError::Io(_))));
+    }
+
+    // ---- interpret_action / prompt_action (the message review prompt) ----
+
+    #[test]
+    fn interpret_action_regenerate_is_case_insensitive() {
+        assert_eq!(interpret_action(b'r', true), Some(ReviewAction::Regenerate));
+        assert_eq!(interpret_action(b'R', true), Some(ReviewAction::Regenerate));
+    }
+
+    #[test]
+    fn interpret_action_edit_is_case_insensitive() {
+        assert_eq!(interpret_action(b'e', true), Some(ReviewAction::Edit));
+        assert_eq!(interpret_action(b'E', true), Some(ReviewAction::Edit));
+    }
+
+    #[test]
+    fn interpret_action_default_is_accept_when_allowed() {
+        assert_eq!(interpret_action(b' ', true), Some(ReviewAction::Accept));
+        assert_eq!(interpret_action(b'\n', true), Some(ReviewAction::Accept));
+        assert_eq!(interpret_action(b'\r', true), Some(ReviewAction::Accept));
+    }
+
+    #[test]
+    fn interpret_action_default_is_edit_when_accept_not_allowed() {
+        // A blank generation has nothing worth accepting, so Space/Enter falls back to
+        // Edit instead — and Accept is unreachable no matter what key is pressed.
+        assert_eq!(interpret_action(b' ', false), Some(ReviewAction::Edit));
+        assert_eq!(interpret_action(b'\n', false), Some(ReviewAction::Edit));
+    }
+
+    #[test]
+    fn interpret_action_rejects_anything_else() {
+        assert_eq!(interpret_action(b'x', true), None);
+        assert_eq!(interpret_action(b'2', true), None);
+        assert_eq!(interpret_action(0x04, true), None);
+    }
+
+    #[test]
+    fn prompt_action_selects_regenerate() {
+        let mut input = Cursor::new(b"r\n".to_vec());
+        let mut output = Vec::new();
+        let action = prompt_action(&mut input, &mut output, true, false).unwrap();
+        assert_eq!(action, ReviewAction::Regenerate);
+    }
+
+    #[test]
+    fn prompt_action_selects_edit() {
+        let mut input = Cursor::new(b"e\n".to_vec());
+        let mut output = Vec::new();
+        let action = prompt_action(&mut input, &mut output, true, false).unwrap();
+        assert_eq!(action, ReviewAction::Edit);
+    }
+
+    #[test]
+    fn prompt_action_blank_line_accepts_when_allowed() {
+        let mut input = Cursor::new(b"\n".to_vec());
+        let mut output = Vec::new();
+        let action = prompt_action(&mut input, &mut output, true, false).unwrap();
+        assert_eq!(action, ReviewAction::Accept);
+    }
+
+    #[test]
+    fn prompt_action_blank_line_edits_when_accept_is_not_allowed() {
+        let mut input = Cursor::new(b"\n".to_vec());
+        let mut output = Vec::new();
+        let action = prompt_action(&mut input, &mut output, false, false).unwrap();
+        assert_eq!(action, ReviewAction::Edit);
+    }
+
+    #[test]
+    fn prompt_action_menu_wording_offers_accept_when_allowed() {
+        let mut input = Cursor::new(b"\n".to_vec());
+        let mut output = Vec::new();
+        prompt_action(&mut input, &mut output, true, false).unwrap();
+        let printed = String::from_utf8(output).unwrap();
+        assert!(printed.contains("[R]egenerate  [E]dit  [Space/Enter] accept: "));
+    }
+
+    #[test]
+    fn prompt_action_menu_wording_offers_edit_default_when_not_allowed() {
+        let mut input = Cursor::new(b"\n".to_vec());
+        let mut output = Vec::new();
+        prompt_action(&mut input, &mut output, false, false).unwrap();
+        let printed = String::from_utf8(output).unwrap();
+        assert!(printed.contains("[R]egenerate  [Space/Enter] edit: "));
+        assert!(!printed.contains("accept"));
+    }
+
+    #[test]
+    fn prompt_action_reprints_menu_and_retries_on_invalid_input() {
+        let mut input = Cursor::new(b"z\n\n".to_vec());
+        let mut output = Vec::new();
+        let action = prompt_action(&mut input, &mut output, true, false).unwrap();
+        assert_eq!(action, ReviewAction::Accept);
+        let printed = String::from_utf8(output).unwrap();
+        // Printed once for the invalid "z", once more for the winning blank line.
+        assert_eq!(printed.matches("[Space/Enter] accept").count(), 2);
+    }
+
+    #[test]
+    fn prompt_action_line_mode_drains_the_rest_of_the_line() {
+        // "r" alone selects Regenerate; the rest of that same line (trailing garbage
+        // before the newline) must be discarded so it doesn't leak into whatever reads
+        // `input` next — leaving exactly "x\n" behind for that next reader.
+        let mut input = Cursor::new(b"rXYZ\nx\n".to_vec());
+        let mut output = Vec::new();
+        let action = prompt_action(&mut input, &mut output, true, false).unwrap();
+        assert_eq!(action, ReviewAction::Regenerate);
+        let mut rest = String::new();
+        input.read_to_string(&mut rest).unwrap();
+        assert_eq!(rest, "x\n");
+    }
+
+    #[test]
+    fn prompt_action_cancels_on_eof_without_a_valid_selection() {
+        let mut input = Cursor::new(Vec::new());
+        let mut output = Vec::new();
+        let result = prompt_action(&mut input, &mut output, true, false);
+        assert!(matches!(result, Err(PickerError::Cancelled)));
+    }
+
+    #[test]
+    fn prompt_action_ctrl_d_byte_cancels_even_mid_stream() {
+        let mut input = Cursor::new(vec![0x04]);
+        let mut output = Vec::new();
+        let result = prompt_action(&mut input, &mut output, true, false);
+        assert!(matches!(result, Err(PickerError::Cancelled)));
+    }
+
+    /// A `BufRead` double whose every read fails — used to exercise `prompt_action`'s
+    /// non-EOF I/O-error path, which real UTF-8-agnostic byte reads (unlike
+    /// `read_line`) can't otherwise be made to hit via a plain `Cursor`.
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("boom"))
+        }
+    }
+
+    impl BufRead for FailingReader {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            Err(std::io::Error::other("boom"))
+        }
+        fn consume(&mut self, _amt: usize) {}
+    }
+
+    #[test]
+    fn prompt_action_io_error_is_not_reported_as_cancelled() {
+        let mut input = FailingReader;
+        let mut output = Vec::new();
+        let result = prompt_action(&mut input, &mut output, true, false);
         assert!(matches!(result, Err(PickerError::Io(_))));
     }
 }

@@ -1,6 +1,11 @@
 //! The `$EDITOR` flow through the real binary: exit 12 (unavailable), 17 (temp file),
 //! 13 (aborted), 1 (deleted file), 15 (blank), and the "temp file always survives"
 //! guarantee (prd.md "Default behavior", "Message pre-population and cleanup").
+//!
+//! `ready_for_editor`'s fake agent always returns a non-blank message, so every test
+//! here must explicitly select `e` at the message review prompt (prd.md "Message
+//! review prompt") to reach `$EDITOR` at all — a blank line there would select the
+//! prompt's default action (accept), skipping `$EDITOR` entirely.
 
 mod common;
 
@@ -32,6 +37,7 @@ fn no_editor_available_is_exit_12_and_leaves_no_temp_file() {
         .env("EDITOR", "")
         .args(["--config"])
         .arg(fx.config_dir())
+        .write_stdin("e\n")
         .assert()
         .code(12);
     assert!(fx.editmsg_files().is_empty());
@@ -45,6 +51,7 @@ fn editor_set_but_unresolvable_is_exit_12() {
         .env("EDITOR", "no-such-editor-xyz")
         .args(["--config"])
         .arg(fx.config_dir())
+        .write_stdin("e\n")
         .assert()
         .code(12);
 }
@@ -60,6 +67,7 @@ fn temp_file_creation_failure_is_exit_17() {
         .env("TMPDIR", fx.tmp_dir().join("does-not-exist"))
         .args(["--config"])
         .arg(fx.config_dir())
+        .write_stdin("e\n")
         .assert()
         .code(17);
 }
@@ -75,6 +83,7 @@ fn an_editor_that_saves_a_message_succeeds() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
+        .write_stdin("e\n")
         .assert()
         .code(0);
     assert_eq!(fx.editmsg_files().len(), 1);
@@ -89,6 +98,7 @@ fn an_editor_that_exits_non_zero_is_aborted() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
+        .write_stdin("e\n")
         .assert()
         .code(13);
     // Temp file still survives even on an aborted editor.
@@ -104,6 +114,7 @@ fn an_editor_that_deletes_the_temp_file_is_exit_1() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
+        .write_stdin("e\n")
         .assert()
         .code(1);
 }
@@ -117,6 +128,7 @@ fn a_blank_saved_message_is_exit_15_and_the_temp_file_still_survives() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
+        .write_stdin("e\n")
         .assert()
         .code(15);
     assert_eq!(fx.editmsg_files().len(), 1);
@@ -135,6 +147,7 @@ fn the_temp_file_is_pre_populated_with_the_generated_message_and_ccm_comment() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
+        .write_stdin("e\n")
         .assert()
         .code(0);
     let captured = fs::read_to_string(&marker).unwrap();
@@ -151,6 +164,7 @@ fn the_editor_temp_file_name_has_the_ccm_editmsg_prefix() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
+        .write_stdin("e\n")
         .assert()
         .code(0);
     let files = fx.editmsg_files();
@@ -175,6 +189,7 @@ fn editor_leading_args_and_a_quoted_path_with_a_space_are_honored() {
         .env("EDITOR", "\"ed with space\" --flag")
         .args(["--config"])
         .arg(fx.config_dir())
+        .write_stdin("e\n")
         .assert()
         .code(0);
 }
@@ -191,6 +206,7 @@ fn progress_lines_up_through_message_generation_appear_on_stderr_in_order() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
+        .write_stdin("e\n")
         .assert()
         .code(0)
         .stderr(

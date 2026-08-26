@@ -89,14 +89,18 @@ Supported platforms: Linux and macOS only. Windows is out of scope — no
     with `--git` is treated as a git repository for this purpose, so passing
     `--include`/`--exclude` there is a usage error (see CLI Interface).
 
-7. Default to editing: generate the commit message, open it in `$EDITOR` — always,
-    even if generation came back blank, giving the user a chance to write their own
-    (see "Message pre-population and cleanup" in CLI Interface) — and after the user
-    saves and exits, commit it automatically.
+7. Default to reviewing: after generation, prompt the user to regenerate, edit, or
+    accept the generated message (see "Message review prompt" in CLI Interface) —
+    defaulting to accept (or edit, when generation came back blank, since there is
+    nothing worth accepting), giving the user a chance to write their own even when
+    generation came back blank. Accept commits the message as-is; edit opens it in
+    `$EDITOR` first, same as before; regenerate re-runs generation against the same
+    selected entry and the same diff, then prompts again. After a non-blank message is
+    settled on, commit it automatically.
     Support `--dry-run` to print the message to stdout instead,
-    without opening the editor or committing. Under `--dry-run` a blank generated
-    message has no such chance to be fixed up, and is a hard failure (see Error
-    Handling, exit code 15).
+    without showing the review prompt, opening the editor, or committing. Under
+    `--dry-run` a blank generated message has no such chance to be fixed up, and is a
+    hard failure (see Error Handling, exit code 15).
     - use `git commit` to commit the message for a git repository.
     - prompt the user to select the jj command to use to commit the message for a jj
       repository, and pass the same `--include`/`--exclude`-resolved files into that
@@ -286,31 +290,34 @@ Passing `--list-tools` together with any flag other than `--config` is also a us
 
 ### Interactive terminal requirement
 
-Default mode (no `--dry-run`) requires a real interactive terminal: both the jj-command
-picker (a stdin prompt, see "jj commit commands") and `$EDITOR` itself need genuine
-interactive stdio to do their jobs — a picker reading a line from stdin, an editor
-attaching to a controlling terminal to actually let the user edit. `ccm` runs no
-explicit upfront check for this; instead, the requirement surfaces naturally through
-existing failure modes when it isn't met — e.g. stdin already at EOF (piped from
-`/dev/null`, or a script with nothing left to send) trips the jj-command picker's
-EOF-cancels-the-picker behavior (exit code 14, see "jj commit commands"), and an editor
-that can't attach to a controlling terminal typically exits non-zero, which `ccm` treats
-as an aborted edit (exit code 13, see "Default behavior").
+Default mode (no `--dry-run`) requires a real interactive terminal: the message review
+prompt (see "Message review prompt"), the jj-command picker (a stdin prompt, see "jj
+commit commands"), and `$EDITOR` itself all need genuine interactive stdio to do their
+jobs — a picker reading a line (or, for the review prompt, a single keypress on a real
+terminal) from stdin, an editor attaching to a controlling terminal to actually let the
+user edit. `ccm` runs no explicit upfront check for this; instead, the requirement
+surfaces naturally through existing failure modes when it isn't met — e.g. stdin
+already at EOF (piped from `/dev/null`, or a script with nothing left to send) trips the
+review prompt's or the jj-command picker's EOF-cancels-the-prompt behavior (exit code
+14, see "Message review prompt" and "jj commit commands"), and an editor that can't
+attach to a controlling terminal typically exits non-zero, which `ccm` treats as an
+aborted edit (exit code 13, see "Default behavior").
 
-Default mode can add a third stdin prompt — the tool picker (see "Selection") — at
+Default mode can add a fourth stdin prompt — the tool picker (see "Selection") — at
 stage 5, before diff generation: whenever the automatic "first `enabled: true` entry"
 rule can't resolve to a single entry on its own (zero enabled, or 2+ enabled) and no
 non-empty `--tool <NAME>` was given. Same EOF-cancels behavior as the jj commit-command
 picker (exit code 14).
 
 `--dry-run` otherwise has no interactive-terminal requirement at all: absent `--tool`, it
-never opens `$EDITOR`, never reads the jj-command picker's stdin prompt, and never shows
-the tool picker either — it always takes the first `enabled: true` entry regardless of
-how many entries are enabled (exit code 6 if none are). So it runs correctly with
-stdin/stdout piped, redirected, or absent entirely (see "Default behavior", "jj commit
-commands", and "Selection"). This split is deliberate, matching the two ways `ccm` is
-meant to be used (see Goal): default mode is for direct interactive use of `ccm` from a
-shell, so it's free to ask when the tool choice is ambiguous, while `--dry-run` is what a
+never shows the message review prompt, never opens `$EDITOR`, never reads the
+jj-command picker's stdin prompt, and never shows the tool picker either — it always
+takes the first `enabled: true` entry regardless of how many entries are enabled (exit
+code 6 if none are). So it runs correctly with stdin/stdout piped, redirected, or absent
+entirely (see "Default behavior", "jj commit commands", and "Selection"). This split is
+deliberate, matching the two ways `ccm` is meant to be used (see Goal): default mode is
+for direct interactive use of `ccm` from a shell, so it's free to ask when the tool
+choice is ambiguous or the message needs a second look, while `--dry-run` is what a
 non-interactive caller — chiefly the thin Neovim Lua wrapper described in Goal, which
 only needs the generated message text on stdout to build its own UI around — is expected
 to use instead, so it never prompts for anything on its own; a caller with 2+ enabled
@@ -562,9 +569,11 @@ not a new risk `ccm` introduces.
 ### Response cleanup
 
 Immediately after stage 7 (Generation) gets a response back from the selected tool/API,
-and before that response is used for anything else — printed under `--dry-run`, or
-pre-populated into the `$EDITOR` temp file (see "Message pre-population and cleanup"
-below) — `ccm` runs it through one cleanup pass: it strips a single Markdown code fence
+and before that response is used for anything else — printed under `--dry-run`, or shown
+at the message review prompt and, if edit is chosen there, pre-populated into the
+`$EDITOR` temp file (see "Message review prompt" and "Message pre-population and
+cleanup" below) — `ccm` runs it through one cleanup pass: it strips a single Markdown
+code fence
 wrapping the whole response, then a single pair of matching quotation marks wrapping the
 whole response or just its first line. Some LLMs answer with the message inside a
 ```…``` block, or as a quoted string (e.g. `"feat: add x"`), regardless of what the
@@ -603,7 +612,66 @@ This step is orthogonal to the `#CCM: `-comment cleanup described next: that one
 scaffolding `ccm` itself writes into the `$EDITOR` temp file, while this one cleans up
 the tool/API's own response before it ever reaches either destination.
 
+### Message review prompt
+
+In default mode, once stage 7 produces a cleaned message (see "Response cleanup"
+above), `ccm` shows a review prompt — on stderr, like every other prompt — before doing
+anything else with it: regenerate, edit, or accept. This replaces the old fixed
+behavior of always opening `$EDITOR`, so a good-enough message can be committed with a
+single keypress, and a poor one can be thrown away and re-requested without leaving
+`ccm` at all.
+
+```
+[R]egenerate  [E]dit  [Space/Enter] accept:
+```
+
+or, when generation came back blank (nothing worth accepting yet):
+
+```
+[R]egenerate  [Space/Enter] edit:
+```
+
+- **Regenerate** (`r`/`R`) re-runs stage 7 (message generation) against the same
+    already-selected `api.yaml` entry and the same already-computed diff — no re-running
+    diff generation, and no re-showing the tool picker — then shows the review prompt
+    again with the new result. There is no limit on how many times this can happen in one
+    run.
+- **Edit** (`e`/`E`) opens `$EDITOR` on the current message exactly as `ccm` always did
+    before this prompt existed (see "Message pre-population and cleanup" below).
+- **Accept** (a space, or Enter/blank line) commits the current message as-is, skipping
+    `$EDITOR` entirely. It runs through the same `#CCM: `-comment cleanup and blank check
+    `$EDITOR`'s own save would (see "Message pre-population and cleanup" below), so an
+    accepted message commits byte-identically to an edit that changed nothing, and the
+    pathological case of a message that's nothing but `#CCM: ` lines still hits exit 15
+    rather than committing garbage.
+- Accept is only offered when the current message is non-blank: a blank generation has
+    nothing worth accepting (accepting it would just be exit 15 with extra steps), so the
+    prompt instead offers only regenerate/edit, with a space or Enter defaulting to edit
+    instead of accept — preserving the "always give the user a chance to write their own"
+    guarantee (Requirement 7) a blank generation has always had.
+
+On a real terminal, the prompt reads a single keypress — no Enter needed for `r`/`e`;
+Space or Enter accepts (or edits, per the blank-message rule above) immediately. When
+stdin isn't a real terminal (piped, redirected, or any non-interactive caller), the
+prompt instead reads a whole line and inspects only its first character, the same
+line-oriented style as every other picker in this document — so a scripted caller
+driving `ccm` still works by writing `"r\n"`/`"e\n"`/`"\n"` one line at a time. Any other
+input reprints the prompt and re-reads, the same reprint-and-retry behavior every other
+picker in this document uses. EOF (stdin closed before a valid selection) cancels the
+whole run — exit code 14, the same "an interactive picker was cancelled" code the tool
+picker and the jj commit-command picker use (see "Selection", "jj commit commands").
+
+This prompt never appears under `--dry-run` (see "Interactive terminal requirement"
+above): `--dry-run` prints stage 7's cleaned response to stdout immediately and never
+commits, so there is nothing here to regenerate, edit, or accept.
+
 ### Message pre-population and cleanup
+
+This section describes what the message review prompt's edit action reaches (see
+"Message review prompt" above); its accept action skips `$EDITOR` and the temp file
+entirely, but still runs the message through the same cleanup step described below
+before committing, so an accepted message and an edit that changed nothing produce an
+identical commit.
 
 The temp file `ccm` opens in `$EDITOR` is pre-populated with the generated message (if
 any), followed by a blank line and a comment block whose lines are each prefixed with
@@ -624,18 +692,22 @@ or, when generation came back blank:
 #CCM: Write your own commit message above, or leave this blank to abort.
 ```
 
-Before use, `ccm` applies a cleanup step to the file `$EDITOR` saves in default mode:
-lines starting with the literal `#CCM: ` prefix are removed, then leading and trailing
-blank lines are trimmed from what remains — a bare `#` is not a comment marker, so a
-legitimately generated line like `#123 fixes the thing` or a markdown heading is left
-alone, and a blank line in the middle of an otherwise non-blank message is left alone too
-(only leading/trailing blank lines are trimmed, not interior ones). If the cleaned result
-is blank, `ccm` exits with code 15 instead of committing; this is only known after the
-editor closes, since the user may have written their own message over a blank generation.
-Only once the cleaned result is confirmed non-blank does `ccm` proceed — straight to
-`git commit` for a git repository, or to the jj commit-command picker for a jj
-repository (see "jj commit commands" below) — so the picker is never shown for a message
-that's about to be discarded as blank.
+Before use, `ccm` applies a cleanup step to the file `$EDITOR` saves in default mode (or,
+for the review prompt's accept action, to the message being accepted, with no file
+involved): lines starting with the literal `#CCM: ` prefix are removed, then leading and
+trailing blank lines are trimmed from what remains — a bare `#` is not a comment marker,
+so a legitimately generated line like `#123 fixes the thing` or a markdown heading is
+left alone, and a blank line in the middle of an otherwise non-blank message is left
+alone too (only leading/trailing blank lines are trimmed, not interior ones). If the
+cleaned result is blank, `ccm` exits with code 15 instead of committing; for edit, this
+is only known after the editor closes, since the user may have written their own message
+over a blank generation — accept can only be chosen over a message the review prompt
+already knows is non-blank (see "Message review prompt" above), but the same check still
+runs, since a message that's entirely `#CCM: `-prefixed lines would otherwise slip
+through. Only once the cleaned result is confirmed non-blank does `ccm` proceed —
+straight to `git commit` for a git repository, or to the jj commit-command picker for a
+jj repository (see "jj commit commands" below) — so the picker is never shown for a
+message that's about to be discarded as blank.
 This match is unconditional and unescaped: a generated or user-written line that happens
 to start with the literal `#CCM: ` prefix is stripped like any other, with no way to
 express a literal one — an accepted limitation, the same class of risk `git` itself
@@ -1044,15 +1116,18 @@ later stages are never reached:
    code 10), response parsing (exit code 11), and the response-cleanup pass (see
    "Response cleanup") — the last of which cannot itself fail, only change what a later
    blank check (exit code 15, stage 8) sees.
-8. **Editor & commit** — under `--dry-run`, this stage is just the empty-message check
-   (exit code 15) — no editor, picker, or commit ever runs. Otherwise: `$EDITOR`/fallback
-   resolution (exit code 12), creating and pre-populating the temp file (exit code 17),
-   running `$EDITOR` (exit code 13), reading back the temp
+8. **Review, editor & commit** — under `--dry-run`, this stage is just the empty-message
+   check (exit code 15) — no review prompt, editor, picker, or commit ever runs.
+   Otherwise: the message review prompt (exit code 14 if cancelled — see "Message review
+   prompt"), looping on regenerate (each iteration re-running stage 7, any of whose
+   failure modes — exit codes 9, 10, 11 — can recur) until edit or accept is chosen; for
+   edit, `$EDITOR`/fallback resolution (exit code 12), creating and pre-populating the
+   temp file (exit code 17), running `$EDITOR` (exit code 13), reading back the temp
    file it saved (exit code 1 if the file has gone missing or unreadable by then, since
-   neither exit 13 nor exit 15 apply), cleanup and the empty-message check (exit code 15),
-   then — only once the cleaned message is confirmed non-blank — the jj commit-command
-   picker (exit code 14, jj only) and the final `git commit`/`jj commit` invocation (exit
-   code 16).
+   neither exit 13 nor exit 15 apply); for either edit or accept, cleanup and the
+   empty-message check (exit code 15); then — only once the cleaned message is confirmed
+   non-blank — the jj commit-command picker (exit code 14, jj only) and the final
+   `git commit`/`jj commit` invocation (exit code 16).
 
 So for the example above — no repo, missing `api.yaml`, `--include` given — step 2
 fails first with exit code 4; the `--include` usage error (step 3) and the config error
@@ -1087,7 +1162,7 @@ before 15 in the table.
 | 11 | Malformed response — `openai_api` only: the response could not be parsed, or parsed but missing the expected message content. Not applicable to `agent_cli`, whose output is raw stdout text; a bad `agent_cli` result surfaces as exit code 10 (non-zero exit) or exit code 15 (blank result), never 11. |
 | 12 | Editor unavailable — `$EDITOR` is set but doesn't resolve to an executable, or `$EDITOR` is unset and none of `nvim`/`vim`/`vi` are found on `$PATH` |
 | 13 | Editor aborted — `$EDITOR` (or the `nvim`/`vim`/`vi` fallback) exited with a non-zero status. The temp file's content is not read, and nothing is committed, regardless of what was saved before the editor exited. |
-| 14 | Aborted — an interactive stdin picker was cancelled (EOF before a valid selection): either the tool picker at stage 5 — default mode, or any mode when `--tool ''` was given (see "Selection") — or the jj-command picker at stage 8 (see "jj commit commands"). In the stage-8 case, nothing is committed. |
+| 14 | Aborted — an interactive stdin picker was cancelled (EOF before a valid selection): the tool picker at stage 5 — default mode, or any mode when `--tool ''` was given (see "Selection") — or, at stage 8, the message review prompt (see "Message review prompt") or the jj-command picker (see "jj commit commands"). In the stage-8 cases, nothing is committed. |
 | 15 | Empty commit message — blank after the applicable check (see "Message pre-population and cleanup"): under `--dry-run`, the tool/API response — after the response-cleanup pass (see "Response cleanup") — is empty or all whitespace, checked immediately; otherwise, the `$EDITOR`-saved file is blank after cleanup, checked after `$EDITOR` closes, since the user may have written one in over a blank generation. |
 | 16 | Commit failed — `git commit` / `jj commit`\|`describe`\|`split` invocation failed |
 | 17 | Temp file creation/write failed — creating the `$EDITOR` temp file (e.g. `tempfile::Builder::new().prefix("CCM_EDITMSG_").tempfile_in(...)` erroring because the OS temp directory is unwritable or the disk is full) or writing the pre-populated content into it failed. Falls between exit codes 12 and 13 in the pipeline (see "Check order" above); listed here, out of numeric sequence, to avoid renumbering 13–16. |
@@ -1140,3 +1215,14 @@ before 15 in the table.
     initial pre-populated content, `$EDITOR` editing it, `ccm` reading it back) happens
     through that same path like any other file, with no further involvement from
     `tempfile`.
+
+7. The message review prompt (see "Message review prompt") reads a single keypress on a
+    real terminal, which needs raw terminal mode (clearing `ICANON`/`ECHO` for the
+    duration of that one read). Rather than a terminal-UI crate like
+    https://crates.io/crates/crossterm or https://crates.io/crates/console, `ccm` uses
+    the `term` feature of `nix` (https://crates.io/crates/nix, already a dependency —
+    see item 3 above's reasoning against pulling in a fuzzy-finder crate for a similarly
+    small piece of terminal interaction) to call `tcgetattr`/`tcsetattr` directly. When
+    stdin isn't a real terminal, the prompt falls back to reading a whole line instead
+    (see "Message review prompt"), so this dependency is only ever exercised on a
+    genuine interactive run.

@@ -1,6 +1,12 @@
 //! Stdout/stderr separation (prd.md "Progress logging"): stdout is reserved solely for
-//! `--dry-run`'s message and `--gen-config`'s report; every progress line and the jj
-//! picker's prompts go to stderr, in all modes, on both success and failure.
+//! `--dry-run`'s message and `--gen-config`'s report; every progress line, the jj
+//! picker's prompts, and the message review prompt go to stderr, in all modes, on both
+//! success and failure.
+//!
+//! `ready`'s fake agent always returns a non-blank message, so default-mode tests here
+//! must get past the message review prompt (prd.md "Message review prompt") too —
+//! `"e\n"` to reach `$EDITOR` explicitly, since a blank line there would accept the
+//! message and skip `$EDITOR` outright.
 
 mod common;
 
@@ -48,6 +54,7 @@ fn default_mode_stdout_stays_empty_through_a_full_successful_run() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
+        .write_stdin("e\n")
         .assert()
         .code(0)
         .stdout(predicate::str::is_empty());
@@ -126,6 +133,7 @@ fn error_paths_across_stages_all_leave_stdout_empty() {
         .env("EDITOR", "")
         .args(["--config"])
         .arg(fx.config_dir())
+        .write_stdin("e\n")
         .assert()
         .code(12)
         .stdout(predicate::str::is_empty());
@@ -165,7 +173,7 @@ fn tool_picker_prompt_is_on_stderr_and_never_leaks_to_stdout() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
-        .write_stdin("0\n")
+        .write_stdin("0\ne\n") // tool picker: "0"; then review prompt: "e"
         .assert()
         .code(0)
         .stdout(predicate::str::is_empty())
@@ -186,7 +194,7 @@ fn full_jj_include_run_progress_lines_appear_on_stderr_in_order() {
         .env("EDITOR", "ed")
         .args(["--include", "a.txt", "--config"])
         .arg(fx.config_dir())
-        .write_stdin("0\n")
+        .write_stdin("\n0\n") // review prompt: accept; then jj picker: "0"
         .assert()
         .code(0);
 

@@ -12,11 +12,16 @@
 //!   (prd.md Goal: a local OmniRoute server). `ccm`'s `api.yaml` is user-authored local
 //!   config, not untrusted input, so this carries no SSRF risk for `ccm` itself.
 //! - `install_default_runtime` is a process-wide `OnceLock` — installable exactly once
-//!   per process. `ccm` only ever calls this once per run (Requirement 4's no-fallback
-//!   design selects exactly one entry), so this always succeeds in production. Tests
-//!   exercising this path drive the real binary as a fresh subprocess per test for the
-//!   same reason (see `tests/backend_openai.rs`), rather than linking litellm-rs into
-//!   the unit-test process.
+//!   per process; a second call errors with "default runtime is already installed".
+//!   Requirement 4's no-fallback design selects exactly one entry per run, but the
+//!   message review prompt's regenerate action (prd.md "Message review prompt") can
+//!   call `generate` more than once against that same entry within one process, so
+//!   `call` below tries `install_default_runtime` first and falls back to
+//!   `replace_default_runtime` (same module) when a runtime is already installed —
+//!   `replace_default_runtime` itself only errors when *no* runtime is installed yet,
+//!   which can't happen on that fallback path. Tests exercising this path drive the
+//!   real binary as a fresh subprocess per test (see `tests/backend_openai.rs`), rather
+//!   than linking litellm-rs into the unit-test process.
 //!
 //! **Accepted limitation** (escalated to and confirmed by the user — see
 //! `.claude-task/ccm-impl/findings.md`): prd.md requires a non-2xx response's body
@@ -41,7 +46,7 @@ use litellm_rs::core::completion::{
 };
 use litellm_rs::core::net::ProviderEndpointAccess;
 use litellm_rs::core::router::{
-    RouterConfig, RuntimeBinding, UnifiedRouter, install_default_runtime,
+    RouterConfig, RuntimeBinding, UnifiedRouter, install_default_runtime, replace_default_runtime,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -140,9 +145,16 @@ async fn call(
             GenerationError::CallFailed(format!("failed to configure provider: {err}"))
         })?;
 
-    install_default_runtime(RuntimeBinding::new(Arc::new(router))).map_err(|err| {
-        GenerationError::CallFailed(format!("failed to install provider runtime: {err}"))
-    })?;
+    // `install_default_runtime` only succeeds the first time per process; every
+    // subsequent call (the review prompt's regenerate action re-running this same
+    // entry — see the module doc above) falls back to `replace_default_runtime`
+    // instead, which swaps in this call's freshly-built router as the new default.
+    let router = Arc::new(router);
+    if install_default_runtime(RuntimeBinding::new(Arc::clone(&router))).is_err() {
+        replace_default_runtime(RuntimeBinding::new(router)).map_err(|err| {
+            GenerationError::CallFailed(format!("failed to install provider runtime: {err}"))
+        })?;
+    }
 
     let mut messages = Vec::new();
     if let Some(system_text) = system {

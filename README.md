@@ -1,9 +1,9 @@
 # ccm — Contextual Commit Message
 
 `ccm` generates a commit message from your current diff (via an OpenAI-compatible API
-or a local agent CLI), opens it in `$EDITOR` for review, and commits it — for both Git
-and Jujutsu (jj) repositories, including colocated ones. See `prd.md` for the full
-normative specification this implementation follows.
+or a local agent CLI), lets you regenerate, edit, or accept it, and commits it — for
+both Git and Jujutsu (jj) repositories, including colocated ones. See `prd.md` for the
+full normative specification this implementation follows.
 
 Supported platforms: Linux and macOS. Windows is out of scope.
 
@@ -12,9 +12,27 @@ Supported platforms: Linux and macOS. Windows is out of scope.
 ```sh
 ccm --gen-config          # writes prompts.yaml/api.yaml into the default config dir
 $EDITOR ~/.config/ccm/api.yaml   # fill in a base_url/api_key (or an agent CLI command)
-ccm                       # generate a message, edit it, commit it
+ccm                       # generate a message, review it, commit it
 ccm --dry-run             # just print the generated message to stdout
 ```
+
+## Reviewing the generated message
+
+After generation, `ccm` shows the message and asks what to do with it:
+
+```
+[R]egenerate  [E]dit  [Space/Enter] accept:
+```
+
+| Key | Action |
+|---|---|
+| `r` / `R` | Regenerate — re-run generation against the same tool/API and the same diff, then ask again. |
+| `e` / `E` | Edit — open the message in `$EDITOR`, same as before. |
+| Space or Enter | Accept — commit the message as-is, skipping `$EDITOR`. |
+
+No Enter is needed for `r`/`e` on a real terminal; when stdin isn't a terminal (piped,
+scripted), the same keys work a line at a time instead. If generation came back blank,
+there's nothing to accept, so only regenerate/edit are offered, with edit as the default.
 
 ## Configuration
 
@@ -73,7 +91,7 @@ earliest-listed stage below wins.
 | 11 | Malformed response (`openai_api` only) |
 | 12 | Editor unavailable — `$EDITOR` doesn't resolve, or is unset with no `nvim`/`vim`/`vi` on `$PATH` |
 | 13 | Editor aborted — `$EDITOR` exited non-zero |
-| 14 | Aborted — an interactive picker (the tool picker in default mode, or in any mode via `--tool ''`, or the jj commit-command picker) was cancelled (EOF on stdin) |
+| 14 | Aborted — an interactive picker (the tool picker in default mode, or in any mode via `--tool ''`; the message review prompt; or the jj commit-command picker) was cancelled (EOF on stdin) |
 | 15 | Empty commit message |
 | 16 | Commit failed — the `git commit`/`jj commit`\|`describe`\|`split` invocation failed |
 | 17 | Temp file creation/write failed |

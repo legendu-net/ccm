@@ -150,10 +150,13 @@ pub fn run(
     // (there's no editor to give the user a chance to fix up a blank response), and the
     // cleaned response is printed to stdout exactly as `generation::generate` returned
     // it — no further stripping, trimming, or added trailing newline; --dry-run never
-    // commits. Otherwise: the full $EDITOR flow to a cleaned, non-blank message, then
-    // straight to `git commit` or the jj commit-command picker (never shown for a
-    // message that's about to be discarded as blank, since it only runs once the
-    // message is already confirmed non-blank).
+    // commits. Otherwise: the message review prompt (prd.md "Message review prompt") —
+    // regenerate (re-run stage 7 against the same selected entry and the same diff,
+    // then ask again), edit (the full $EDITOR flow, unchanged from before), or accept
+    // (commit the message as-is, skipping $EDITOR entirely) — then straight to
+    // `git commit` or the jj commit-command picker (never shown for a message that's
+    // about to be discarded as blank, since it only runs once the message is already
+    // confirmed non-blank).
     if cli.dry_run {
         if message.trim().is_empty() {
             return Err(EditorError::BlankMessage.into());
@@ -163,11 +166,47 @@ pub fn run(
         return Ok(());
     }
 
-    let generated = (!message.trim().is_empty()).then_some(message.as_str());
-    let cleaned_message = editor::edit_message(generated, env)?;
+    let raw = env.stdin_is_terminal();
+    let mut message = message;
+    let final_message = loop {
+        let blank = message.trim().is_empty();
+        // A blank generation has nothing worth accepting (accepting it would just be
+        // exit 15 with extra steps), so the prompt only offers regenerate/edit then —
+        // see `picker::prompt_action`'s `allow_accept` parameter.
+        let action =
+            picker::prompt_action(stdin, stderr, !blank, raw).map_err(picker::to_ccm_error)?;
+        let _ = progress::blank_line(stderr);
+        match action {
+            picker::ReviewAction::Regenerate => {
+                message = generation::generate(
+                    selected,
+                    &loaded.prompts,
+                    &diff_result.diff,
+                    &cwd,
+                    env,
+                    stderr,
+                )?;
+            }
+            picker::ReviewAction::Edit => {
+                let generated = (!blank).then_some(message.as_str());
+                break editor::edit_message(generated, env)?;
+            }
+            picker::ReviewAction::Accept => {
+                // Same cleanup/blank-check pair the edit path applies to whatever
+                // $EDITOR saves (`src/editor/mod.rs`), so an accepted message commits
+                // byte-identically either way, and the pathological "message is
+                // nothing but #CCM: lines" case still hits exit 15.
+                let cleaned = editor::message::cleanup(&message);
+                if editor::message::is_blank(&cleaned) {
+                    return Err(EditorError::BlankMessage.into());
+                }
+                break cleaned;
+            }
+        }
+    };
     commit::commit(
         &handling,
-        &cleaned_message,
+        &final_message,
         &diff_result.files,
         &cwd,
         stdin,

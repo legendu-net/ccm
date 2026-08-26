@@ -21,4 +21,5 @@ pub mod pipeline;
 pub mod progress;
 pub mod prompt;
 pub mod repo;
+pub mod term;
 pub mod vcs;

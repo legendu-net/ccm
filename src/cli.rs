@@ -47,10 +47,6 @@ pub struct Cli {
     /// Use this api.yaml entry by name for this run, regardless of its `enabled` flag.
     #[arg(short = 't', long, value_name = "NAME")]
     pub tool: Option<String>,
-
-    /// Pick the tool/API interactively from a numbered list.
-    #[arg(short = 'i', long)]
-    pub interactive: bool,
 }
 
 impl Cli {
@@ -69,15 +65,11 @@ pub fn validate_shape(cli: &Cli) -> Result<(), UsageError> {
     if !cli.include.is_empty() && !cli.exclude.is_empty() {
         return Err(UsageError::IncludeExcludeConflict);
     }
-    if cli.tool.is_some() && cli.interactive {
-        return Err(UsageError::ToolAndInteractive);
-    }
     if cli.gen_config
         && (cli.git
             || cli.dry_run
             || cli.list_tools
             || cli.tool.is_some()
-            || cli.interactive
             || !cli.include.is_empty()
             || !cli.exclude.is_empty())
     {
@@ -86,7 +78,6 @@ pub fn validate_shape(cli: &Cli) -> Result<(), UsageError> {
     if cli.list_tools
         && (cli.git
             || cli.dry_run
-            || cli.interactive
             || cli.tool.is_some()
             || !cli.include.is_empty()
             || !cli.exclude.is_empty())
@@ -110,7 +101,6 @@ mod tests {
             gen_config: false,
             list_tools: false,
             tool: None,
-            interactive: false,
         }
     }
 
@@ -201,28 +191,6 @@ mod tests {
     }
 
     #[test]
-    fn gen_config_with_interactive_is_rejected() {
-        let mut cli = base();
-        cli.gen_config = true;
-        cli.interactive = true;
-        assert!(matches!(
-            validate_shape(&cli),
-            Err(UsageError::GenConfigWithOtherFlags)
-        ));
-    }
-
-    #[test]
-    fn tool_and_interactive_together_is_rejected() {
-        let mut cli = base();
-        cli.tool = Some("x".into());
-        cli.interactive = true;
-        assert!(matches!(
-            validate_shape(&cli),
-            Err(UsageError::ToolAndInteractive)
-        ));
-    }
-
-    #[test]
     fn list_tools_alone_is_fine() {
         let mut cli = base();
         cli.list_tools = true;
@@ -260,24 +228,6 @@ mod tests {
     }
 
     #[test]
-    fn list_tools_with_interactive_is_rejected() {
-        let mut cli = base();
-        cli.list_tools = true;
-        cli.interactive = true;
-        assert!(matches!(
-            validate_shape(&cli),
-            Err(UsageError::ListToolsWithOtherFlags)
-        ));
-    }
-
-    #[test]
-    fn interactive_alone_is_fine() {
-        let mut cli = base();
-        cli.interactive = true;
-        assert!(validate_shape(&cli).is_ok());
-    }
-
-    #[test]
     fn tool_alone_is_fine() {
         let mut cli = base();
         cli.tool = Some("x".into());
@@ -303,20 +253,12 @@ mod tests {
         assert!(!cli.gen_config);
         assert!(!cli.list_tools);
         assert_eq!(cli.tool, None);
-        assert!(!cli.interactive);
     }
 
     #[test]
-    fn cli_parses_tool_and_interactive_flags() {
+    fn cli_parses_tool_and_list_tools_flags() {
         let cli = Cli::parse_from(["ccm", "--tool", "OmniRoute"]);
         assert_eq!(cli.tool, Some("OmniRoute".to_string()));
-        assert!(!cli.interactive);
-
-        let cli = Cli::parse_from(["ccm", "-i"]);
-        assert!(cli.interactive);
-
-        let cli = Cli::parse_from(["ccm", "--interactive"]);
-        assert!(cli.interactive);
 
         let cli = Cli::parse_from(["ccm", "--list-tools"]);
         assert!(cli.list_tools);

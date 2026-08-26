@@ -69,8 +69,6 @@ pub enum UsageError {
     IncludeExcludeUnderGit,
     #[error("{entry}: does not match any file in the jj working copy")]
     UnmatchedPath { entry: String },
-    #[error("--tool and --interactive are mutually exclusive")]
-    ToolAndInteractive,
     #[error("--list-tools cannot be combined with any flag other than --config")]
     ListToolsWithOtherFlags,
 }
@@ -256,7 +254,6 @@ mod tests {
             (UsageError::GitFlagOutsideGitRepo.into(), 2),
             (UsageError::IncludeExcludeUnderGit.into(), 2),
             (UsageError::UnmatchedPath { entry: "x".into() }.into(), 2),
-            (UsageError::ToolAndInteractive.into(), 2),
             (UsageError::ListToolsWithOtherFlags.into(), 2),
             (GenConfigError("boom".into()).into(), 3),
             (NotARepo.into(), 4),

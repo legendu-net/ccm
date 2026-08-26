@@ -1,7 +1,8 @@
 //! Plain numbered stdin pickers (prd.md, "jj commit commands"; "Selection"): the jj
-//! commit-command picker (never more than two choices) and the `--interactive` tool
-//! picker (an arbitrary number of `api.yaml` entries) — both plain stdin prompts, so no
-//! fuzzy-finder crate is warranted (see "Preferences of Dependencies" #3).
+//! commit-command picker (never more than two choices) and default mode's tool picker
+//! (an arbitrary number of `api.yaml` entries, shown only when the choice is ambiguous)
+//! — both plain stdin prompts, so no fuzzy-finder crate is warranted (see "Preferences
+//! of Dependencies" #3).
 
 use crate::error::{CcmError, PickerCancelled};
 use crate::vcs::argv::JjCommitCommand;
@@ -111,7 +112,7 @@ pub fn prompt(
 /// Maps a [`PickerError`] to its documented exit code: true EOF without a selection is
 /// [`PickerCancelled`] (exit 14); any other error (e.g. invalid UTF-8 on stdin) is the
 /// generic exit-1 catch-all. Shared by every picker caller (the jj commit-command picker
-/// in `commit.rs`, the `--interactive` tool picker in `pipeline.rs`) so the two variants
+/// in `commit.rs`, the tool picker in `pipeline.rs`) so the two variants
 /// are never mapped inconsistently.
 #[must_use]
 pub fn to_ccm_error(err: PickerError) -> CcmError {
@@ -122,7 +123,7 @@ pub fn to_ccm_error(err: PickerError) -> CcmError {
     }
 }
 
-/// Interprets one line of `--interactive` tool-picker input: trimmed, then accepted as a
+/// Interprets one line of tool-picker input: trimmed, then accepted as a
 /// selection only if it parses as a `usize` strictly less than `count`; anything else —
 /// including a blank line, a negative number, or an out-of-range index — is a retry.
 #[must_use]
@@ -133,7 +134,7 @@ pub fn interpret_index(line: &str, count: usize) -> PickerInput {
     }
 }
 
-/// The `--interactive` tool picker: an arbitrary-length numbered-menu variant of
+/// Default mode's tool picker: an arbitrary-length numbered-menu variant of
 /// [`prompt`]. Prints each of `lines` as `N) <line>` (the `(default)` marker, if any, is
 /// already baked into the relevant line by `config::listing::lines` — this function adds
 /// no marker of its own), then a `Select a tool [0-N]: ` prompt with no trailing newline

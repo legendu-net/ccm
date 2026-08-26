@@ -7,11 +7,11 @@
 //! This now covers the full spec: stage 1 (argument shape), the `--gen-config` and
 //! `--list-tools` short-circuits, stage 2 (repository detection), stage 3
 //! (repo-dependent argument validation), stage 4 (config load & validation), stage 5
-//! (tool/API selection — the first enabled entry, or an explicit `--tool <NAME>`, or an
-//! `--interactive` pick), stage 6 (diff generation), stage 7 (message generation), and
-//! stage 8 (`--dry-run`'s immediate blank check and raw stdout print, or the default
-//! mode's full `$EDITOR` flow followed by the jj commit-command picker and the final
-//! commit invocation).
+//! (tool/API selection — an explicit `--tool <NAME>`, or the first enabled entry, or, in
+//! default mode with an ambiguous choice, a tool-picker prompt), stage 6 (diff
+//! generation), stage 7 (message generation), and stage 8 (`--dry-run`'s immediate blank
+//! check and raw stdout print, or the default mode's full `$EDITOR` flow followed by the
+//! jj commit-command picker and the final commit invocation).
 
 use crate::cli::{self, Cli};
 use crate::commit;
@@ -93,14 +93,22 @@ pub fn run(
     let loaded = config::loader::load(&config_dir)?;
 
     // Stage 5: tool/API selection — a trivial list scan with no probing of any kind
-    // (see "Selection"), so an api.yaml with every entry disabled (or an unmatched
-    // `--tool <NAME>`) fails fast before diff generation ever runs. `--tool` overrides
-    // the first-enabled rule outright, including selecting a disabled entry; absent
-    // that, `--interactive` prompts for one of `loaded.entries` (never empty — an empty
-    // api.yaml is already `ConfigError::Empty` at stage 4).
+    // (see "Selection"), so an unmatched `--tool <NAME>` (or, under `--dry-run`, an
+    // api.yaml with every entry disabled) fails fast before diff generation ever runs.
+    // `--tool` overrides everything else outright, including selecting a disabled
+    // entry. Absent that,
+    // `--dry-run` always takes the first enabled entry (there's no one to ask, and the
+    // Neovim wrapper needs this to run unattended). In default mode, the same
+    // first-enabled rule applies as long as there's no real choice to make — exactly one
+    // entry enabled; otherwise (zero enabled, or 2+ enabled) a human is presumably at the
+    // keyboard already (default mode already needs `$EDITOR` and, under jj, the
+    // commit-command picker), so `ccm` prompts for one of `loaded.entries` instead (never
+    // empty — an empty api.yaml is already `ConfigError::Empty` at stage 4).
     let selected = if let Some(name) = cli.tool.as_deref() {
         config::validate::select_by_name(&loaded.entries, name)?
-    } else if cli.interactive {
+    } else if cli.dry_run || config::validate::enabled_count(&loaded.entries) == 1 {
+        config::validate::select_first_enabled(&loaded.entries)?
+    } else {
         let lines = config::listing::lines(&loaded.entries);
         // A blank line at the prompt selects the same entry the `(default)` marker
         // above names — `None` when nothing is enabled, so a blank line just re-prompts
@@ -110,8 +118,6 @@ pub fn run(
             picker::prompt_index(stdin, stderr, &lines, default).map_err(picker::to_ccm_error)?;
         let _ = progress::blank_line(stderr);
         &loaded.entries[index]
-    } else {
-        config::validate::select_first_enabled(&loaded.entries)?
     };
 
     // Stage 6: diff generation.
@@ -176,7 +182,6 @@ mod tests {
             gen_config: false,
             list_tools: false,
             tool: None,
-            interactive: false,
         }
     }
 
@@ -228,12 +233,8 @@ mod tests {
         assert_eq!(err.exit_code().as_u8(), 5);
     }
 
-    #[test]
-    fn all_entries_disabled_surfaces_as_exit_6() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("repo/.git")).unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
+    fn write_all_disabled_config(config_dir: &std::path::Path) {
+        std::fs::create_dir_all(config_dir).unwrap();
         std::fs::write(
             config_dir.join("prompts.yaml"),
             "default:\n  template: write it\n",
@@ -244,6 +245,39 @@ mod tests {
             "- name: a\n  type: openai_api\n  enabled: false\n  prompt: default\n  base_url: http://x\n  model: m\n  api_key:\n    env: K\n",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn all_entries_disabled_under_dry_run_surfaces_as_exit_6() {
+        // `--dry-run` never prompts (see "Interactive terminal requirement"), so with
+        // nothing enabled it still fails fast at stage 5 exactly as before.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("repo/.git")).unwrap();
+        let config_dir = tmp.path().join("config");
+        write_all_disabled_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: tmp.path().join("repo"),
+            ..FakeEnvironment::new()
+        };
+        let mut cli = base_cli();
+        cli.dry_run = true;
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 6);
+    }
+
+    #[test]
+    fn all_entries_disabled_in_default_mode_prompts_and_eof_cancels() {
+        // Default mode still has a human to ask, so zero enabled entries triggers the
+        // tool picker instead of failing outright; with stdin already at EOF, that
+        // surfaces as the picker-cancelled exit code (14), not exit 6.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("repo/.git")).unwrap();
+        let config_dir = tmp.path().join("config");
+        write_all_disabled_config(&config_dir);
         let env = FakeEnvironment {
             cwd: tmp.path().join("repo"),
             ..FakeEnvironment::new()
@@ -254,7 +288,7 @@ mod tests {
         let mut out = Vec::new();
         let mut stderr = Vec::new();
         let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
-        assert_eq!(err.exit_code().as_u8(), 6);
+        assert_eq!(err.exit_code().as_u8(), 14);
     }
 
     #[test]
@@ -432,7 +466,95 @@ mod tests {
     }
 
     #[test]
-    fn interactive_picker_cancelled_on_eof_surfaces_as_exit_14() {
+    fn tool_flag_in_default_mode_with_two_enabled_entries_never_prompts() {
+        // `--tool` must win outright regardless of `enabled_count`, in either mode: 2
+        // enabled entries would otherwise make default mode's picker trigger, but with
+        // `--tool` given, EOF'd stdin must not cancel anything — selection succeeds and
+        // the run fails only later, at stage 6 (nothing staged, exit 8), proving the
+        // picker was never reached.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_enabled_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new()
+        };
+        let mut cli = base_cli();
+        cli.tool = Some("b".to_string());
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(!printed.contains("Select a tool"));
+    }
+
+    fn write_two_enabled_entry_config(config_dir: &std::path::Path) {
+        // Unlike `write_two_entry_config`, both entries are `enabled: true` — default
+        // mode's tool picker only triggers when the choice is genuinely ambiguous (2+
+        // entries enabled), so tests exercising that picker need this shape instead.
+        std::fs::create_dir_all(config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("prompts.yaml"),
+            "default:\n  template: write it\n",
+        )
+        .unwrap();
+        std::fs::write(
+            config_dir.join("api.yaml"),
+            "- name: a\n  type: openai_api\n  prompt: default\n  base_url: http://x\n  model: m\n  api_key:\n    env: K\n\
+             - name: b\n  type: openai_api\n  prompt: default\n  base_url: http://y\n  model: m\n  api_key:\n    env: K\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn tool_picker_cancelled_on_eof_surfaces_as_exit_14() {
+        // Default mode with 2+ enabled entries and no `--tool`: the ambiguous choice
+        // must trigger the tool picker before diff generation (or `$EDITOR`) ever runs,
+        // so an EOF'd stdin cancels the whole run at stage 5.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_enabled_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new()
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 14);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(printed.contains("Select a tool"));
+    }
+
+    #[test]
+    fn single_enabled_entry_selects_silently_without_prompting() {
+        // Exactly one entry enabled ("a"; "b" is disabled): default mode must not
+        // prompt at all, so an EOF'd stdin doesn't cancel the run at stage 5 — it
+        // reaches diff generation instead (nothing staged in a fresh repo, exit 8).
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -450,14 +572,13 @@ mod tests {
             ..FakeEnvironment::new()
         };
         let mut cli = base_cli();
-        cli.interactive = true;
         cli.config = Some(config_dir);
         let mut stdin = std::io::Cursor::new(Vec::new());
         let mut out = Vec::new();
         let mut stderr = Vec::new();
         let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
-        assert_eq!(err.exit_code().as_u8(), 14);
+        assert_eq!(err.exit_code().as_u8(), 8);
         let printed = String::from_utf8(stderr).unwrap();
-        assert!(printed.contains("Select a tool"));
+        assert!(!printed.contains("Select a tool"));
     }
 }

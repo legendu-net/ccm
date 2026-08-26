@@ -152,6 +152,15 @@ pub fn select_first_enabled(entries: &[Entry]) -> Result<&Entry, SelectionError>
         .ok_or(SelectionError::NoEnabledTool)
 }
 
+/// How many entries have `enabled: true`. Drives default mode's tool-picker trigger
+/// (prd.md "Selection"): exactly one enabled means there's no real choice to make, so
+/// `ccm` uses it silently via [`select_first_enabled`]; zero or 2+ means the picker
+/// prompts instead. Pure.
+#[must_use]
+pub fn enabled_count(entries: &[Entry]) -> usize {
+    entries.iter().filter(|entry| entry.enabled).count()
+}
+
 /// `--tool <NAME>` override (prd.md "Selection"): selects the entry whose `name`
 /// matches `name` exactly, byte-for-byte and case-sensitive — the same comparison the
 /// uniqueness check uses — regardless of its `enabled` flag. Entry names are already
@@ -429,6 +438,32 @@ mod tests {
         .unwrap();
         let selected = select_first_enabled(&config.entries).unwrap();
         assert_eq!(selected.name, "first");
+    }
+
+    // ---- enabled_count ----
+
+    #[test]
+    fn enabled_count_counts_only_enabled_entries() {
+        let mut disabled = openai_entry("first", "default");
+        disabled.enabled = false;
+        let config = validate(
+            prompts_with("default"),
+            vec![
+                disabled,
+                openai_entry("second", "default"),
+                openai_entry("third", "default"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(enabled_count(&config.entries), 2);
+    }
+
+    #[test]
+    fn enabled_count_is_zero_when_nothing_is_enabled() {
+        let mut entry = openai_entry("a", "default");
+        entry.enabled = false;
+        let config = validate(prompts_with("default"), vec![entry]).unwrap();
+        assert_eq!(enabled_count(&config.entries), 0);
     }
 
     // ---- select_by_name ----

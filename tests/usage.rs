@@ -79,26 +79,6 @@ fn gen_config_with_tool_is_a_usage_error() {
 }
 
 #[test]
-fn gen_config_with_interactive_is_a_usage_error() {
-    let fx = Fixture::new();
-    fx.ccm()
-        .args(["--gen-config", "--interactive"])
-        .assert()
-        .code(2)
-        .stdout(predicate::str::is_empty());
-}
-
-#[test]
-fn tool_and_interactive_together_is_a_usage_error() {
-    let fx = Fixture::new();
-    fx.ccm()
-        .args(["--tool", "x", "--interactive"])
-        .assert()
-        .code(2)
-        .stdout(predicate::str::is_empty());
-}
-
-#[test]
 fn list_tools_with_dry_run_is_a_usage_error() {
     let fx = Fixture::new();
     fx.ccm()
@@ -113,16 +93,6 @@ fn list_tools_with_tool_is_a_usage_error() {
     let fx = Fixture::new();
     fx.ccm()
         .args(["--list-tools", "--tool", "x"])
-        .assert()
-        .code(2)
-        .stdout(predicate::str::is_empty());
-}
-
-#[test]
-fn list_tools_with_interactive_is_a_usage_error() {
-    let fx = Fixture::new();
-    fx.ccm()
-        .args(["--list-tools", "--interactive"])
         .assert()
         .code(2)
         .stdout(predicate::str::is_empty());

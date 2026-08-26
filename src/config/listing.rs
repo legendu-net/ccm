@@ -1,6 +1,6 @@
-//! Human-readable rendering of `api.yaml` entries, shared by `--list-tools` and the
-//! `--interactive` tool picker so the two views can never drift apart (see
-//! `pipeline.rs`).
+//! Human-readable rendering of `api.yaml` entries, shared by `--list-tools` and
+//! default mode's tool picker (stage 5, when the tool choice is ambiguous) so the two
+//! views can never drift apart (see `pipeline.rs`).
 
 use super::model::{Entry, EntryKind};
 
@@ -14,10 +14,10 @@ fn type_label(kind: &EntryKind) -> &'static str {
 }
 
 /// The index of the entry [`lines`] marks `(default)` — the same first-`enabled: true`
-/// entry `config::validate::select_first_enabled` would pick automatically. `None` if
-/// nothing is enabled. Shared with the `--interactive` picker's own default (see
-/// `pipeline.rs`), so the marker printed here and the entry a blank line at the prompt
-/// selects can never drift apart.
+/// entry `config::validate::select_first_enabled` would pick automatically (whether
+/// silently, or via `--dry-run`). `None` if nothing is enabled. Shared with the tool
+/// picker's own default (see `pipeline.rs`), so the marker printed here and the entry a
+/// blank line at the prompt selects can never drift apart.
 #[must_use]
 pub fn default_index(entries: &[Entry]) -> Option<usize> {
     entries.iter().position(|e| e.enabled)
@@ -25,8 +25,8 @@ pub fn default_index(entries: &[Entry]) -> Option<usize> {
 
 /// One display line per entry, in `api.yaml` order: `name`, `type`, an
 /// `[enabled]`/`[disabled]` marker, and `(default)` on the first enabled entry — the one
-/// plain `ccm` (no `--tool`/`--interactive`) would select. Names are left-padded to the
-/// widest name so the columns line up.
+/// `select_first_enabled` would pick automatically, absent `--tool`. Names are
+/// left-padded to the widest name so the columns line up.
 #[must_use]
 pub fn lines(entries: &[Entry]) -> Vec<String> {
     let name_width = entries

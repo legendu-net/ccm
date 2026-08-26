@@ -1,8 +1,9 @@
-//! `--list-tools`, `--tool <NAME>`, and `--interactive` (prd.md "Selection", "Check
-//! order") through the real binary: the listing short-circuit (like `--gen-config`, it
-//! needs no repo), the `--tool` override (including selecting a disabled entry, and
-//! exit 6 for an unmatched name), and the interactive picker (selection, reprompting on
-//! invalid input, and exit 14 on cancellation).
+//! `--list-tools`, `--tool <NAME>`, and default mode's tool picker (prd.md "Selection",
+//! "Check order") through the real binary: the listing short-circuit (like
+//! `--gen-config`, it needs no repo), the `--tool` override (including selecting a
+//! disabled entry, and exit 6 for an unmatched name), and the tool picker default mode
+//! shows whenever the first-enabled rule can't resolve on its own (selection,
+//! reprompting on invalid input, and exit 14 on cancellation).
 
 mod common;
 
@@ -15,12 +16,25 @@ fn valid_prompts() -> &'static str {
 
 /// A two-entry `agent_cli` config: `a` is enabled and echoes "feat: from a", `b` is
 /// disabled and echoes "feat: from b". Agent CLIs (not `openai_api`) so no HTTP mock is
-/// needed — matching the convention `Fixture::write_valid_config` already uses.
+/// needed — matching the convention `Fixture::write_valid_config` already uses. Exactly
+/// one entry enabled, so default mode selects "a" silently — used by tests pinning that
+/// no-prompt behavior, and by `--tool`/`--list-tools` tests where the picker is
+/// irrelevant.
 fn write_two_tool_config(fx: &Fixture) {
     fx.write_script("agent-a", "echo 'feat: from a'");
     fx.write_script("agent-b", "echo 'feat: from b'");
     let api = "- name: a\n  type: agent_cli\n  prompt: default\n  command: agent-a\n  model: m\n  args: []\n\
                - name: b\n  type: agent_cli\n  enabled: false\n  prompt: default\n  command: agent-b\n  model: m\n  args: []\n";
+    fx.write_config(api, valid_prompts());
+}
+
+/// Same shape as [`write_two_tool_config`], but both entries are `enabled: true` — the
+/// choice is genuinely ambiguous, so default mode's tool picker triggers.
+fn write_two_enabled_tool_config(fx: &Fixture) {
+    fx.write_script("agent-a", "echo 'feat: from a'");
+    fx.write_script("agent-b", "echo 'feat: from b'");
+    let api = "- name: a\n  type: agent_cli\n  prompt: default\n  command: agent-a\n  model: m\n  args: []\n\
+               - name: b\n  type: agent_cli\n  prompt: default\n  command: agent-b\n  model: m\n  args: []\n";
     fx.write_config(api, valid_prompts());
 }
 
@@ -88,68 +102,99 @@ fn tool_flag_with_unknown_name_is_exit_6() {
         .stderr(predicate::str::contains("no-such-tool"));
 }
 
+/// A fake `$EDITOR` that copies the temp file's pre-populated content (the generated
+/// message the tool picker's choice produced, plus the `#CCM:` comment) to `marker`
+/// before overwriting the temp file with a fixed, always-committable message — so the
+/// run still reaches a real `git commit` (exit 0) while `marker` pins which tool
+/// actually ran, matching the pattern `tests/editor.rs`'s
+/// `the_temp_file_is_pre_populated_with_the_generated_message_and_ccm_comment` uses.
+fn install_capturing_editor(fx: &Fixture, marker: &std::path::Path) {
+    fx.write_script(
+        "ed",
+        &format!(
+            "cp \"$1\" {}\nprintf 'feat: edited\\n' > \"$1\"",
+            marker.display()
+        ),
+    );
+}
+
 #[test]
-fn interactive_picks_the_second_entry() {
+fn no_tool_flag_picker_selects_the_second_entry() {
+    // Both entries enabled, so default mode's picker triggers; picking index 1 ("b")
+    // must be what generates the commit message.
     let fx = Fixture::new();
     fx.init_git();
-    write_two_tool_config(&fx);
+    write_two_enabled_tool_config(&fx);
     fx.write("f.txt", "hello\n");
     fx.stage("f.txt");
+    let marker = fx.tmp_dir().join("captured.txt");
+    install_capturing_editor(&fx, &marker);
 
     fx.ccm()
-        .args(["--interactive", "--dry-run", "--config"])
+        .env("EDITOR", "ed")
+        .args(["--config"])
         .arg(fx.config_dir())
         .write_stdin("1\n")
         .assert()
         .code(0)
-        .stdout("feat: from b\n")
         .stderr(predicate::str::contains("Select a tool"));
+    let captured = std::fs::read_to_string(&marker).unwrap();
+    assert!(captured.starts_with("feat: from b"));
 }
 
 #[test]
-fn interactive_reprompts_on_invalid_input_before_succeeding() {
+fn picker_reprompts_on_invalid_input_before_succeeding() {
     // "garbage" and "99" (out of range) are both genuinely invalid and must retry; a
     // blank line is deliberately excluded here since it now selects the default entry
-    // "a" (covered separately by interactive_blank_input_selects_the_default_tool).
+    // "a" (covered separately by picker_blank_input_selects_the_default_tool).
     let fx = Fixture::new();
     fx.init_git();
-    write_two_tool_config(&fx);
+    write_two_enabled_tool_config(&fx);
     fx.write("f.txt", "hello\n");
     fx.stage("f.txt");
+    let marker = fx.tmp_dir().join("captured.txt");
+    install_capturing_editor(&fx, &marker);
 
     fx.ccm()
-        .args(["--interactive", "--dry-run", "--config"])
+        .env("EDITOR", "ed")
+        .args(["--config"])
         .arg(fx.config_dir())
         .write_stdin("garbage\n99\n1\n")
         .assert()
-        .code(0)
-        .stdout("feat: from b\n");
+        .code(0);
+    let captured = std::fs::read_to_string(&marker).unwrap();
+    assert!(captured.starts_with("feat: from b"));
 }
 
 #[test]
-fn interactive_blank_input_selects_the_default_tool() {
-    // "a" is the enabled/default entry (see write_two_tool_config); a blank line at the
-    // prompt selects it without the user typing "0".
+fn picker_blank_input_selects_the_default_tool() {
+    // "a" is the first-enabled/default entry; a blank line at the prompt selects it
+    // without the user typing "0".
     let fx = Fixture::new();
     fx.init_git();
-    write_two_tool_config(&fx);
+    write_two_enabled_tool_config(&fx);
     fx.write("f.txt", "hello\n");
     fx.stage("f.txt");
+    let marker = fx.tmp_dir().join("captured.txt");
+    install_capturing_editor(&fx, &marker);
 
     fx.ccm()
-        .args(["--interactive", "--dry-run", "--config"])
+        .env("EDITOR", "ed")
+        .args(["--config"])
         .arg(fx.config_dir())
         .write_stdin("\n")
         .assert()
         .code(0)
-        .stdout("feat: from a\n")
         .stderr(predicate::str::contains("(default)"));
+    let captured = std::fs::read_to_string(&marker).unwrap();
+    assert!(captured.starts_with("feat: from a"));
 }
 
 #[test]
-fn interactive_blank_input_without_a_default_still_retries() {
-    // Every entry is disabled here, so there's no default — a blank line must still
-    // retry, and only an explicit index selects an entry.
+fn picker_blank_input_without_a_default_still_retries() {
+    // Every entry is disabled here (zero enabled, so the picker still triggers), and
+    // there's no default — a blank line must still retry, and only an explicit index
+    // selects an entry.
     let fx = Fixture::new();
     fx.init_git();
     fx.write_script("agent-a", "echo 'feat: from a'");
@@ -159,33 +204,62 @@ fn interactive_blank_input_without_a_default_still_retries() {
     );
     fx.write("f.txt", "hello\n");
     fx.stage("f.txt");
+    let marker = fx.tmp_dir().join("captured.txt");
+    install_capturing_editor(&fx, &marker);
 
     fx.ccm()
-        .args(["--interactive", "--dry-run", "--config"])
+        .env("EDITOR", "ed")
+        .args(["--config"])
         .arg(fx.config_dir())
         .write_stdin("\n0\n")
         .assert()
-        .code(0)
-        .stdout("feat: from a\n");
+        .code(0);
+    let captured = std::fs::read_to_string(&marker).unwrap();
+    assert!(captured.starts_with("feat: from a"));
 }
 
 #[test]
-fn interactive_cancelled_on_eof_is_exit_14() {
+fn picker_cancelled_on_eof_is_exit_14() {
     // True EOF (write_stdin("") closes stdin with zero bytes) is distinct from a blank
     // line ending in Enter (which now selects the default, see
-    // interactive_blank_input_selects_the_default_tool) — this pins that EOF still
-    // cancels rather than silently falling back to the default.
+    // picker_blank_input_selects_the_default_tool) — this pins that EOF still cancels
+    // rather than silently falling back to the default.
     let fx = Fixture::new();
     fx.init_git();
-    write_two_tool_config(&fx);
+    write_two_enabled_tool_config(&fx);
     fx.write("f.txt", "hello\n");
     fx.stage("f.txt");
 
     fx.ccm()
-        .args(["--interactive", "--dry-run", "--config"])
+        .args(["--config"])
         .arg(fx.config_dir())
         .write_stdin("")
         .assert()
         .code(14)
         .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn single_enabled_entry_selects_silently_in_default_mode() {
+    // Exactly one entry enabled ("a"; "b" disabled): default mode must not show the
+    // picker at all, so EOF'd stdin doesn't cancel anything — it reaches the (fake)
+    // editor and commits using "a"'s message.
+    let fx = Fixture::new();
+    fx.init_git();
+    write_two_tool_config(&fx);
+    fx.write("f.txt", "hello\n");
+    fx.stage("f.txt");
+    let marker = fx.tmp_dir().join("captured.txt");
+    install_capturing_editor(&fx, &marker);
+
+    fx.ccm()
+        .env("EDITOR", "ed")
+        .args(["--config"])
+        .arg(fx.config_dir())
+        .write_stdin("")
+        .assert()
+        .code(0)
+        .stderr(predicate::str::contains("Select a tool").not());
+    let captured = std::fs::read_to_string(&marker).unwrap();
+    assert!(captured.starts_with("feat: from a"));
 }

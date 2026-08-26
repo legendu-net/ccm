@@ -90,11 +90,14 @@ fn unknown_yaml_key_is_exit_5() {
 
 #[test]
 fn all_entries_disabled_is_exit_6() {
+    // `--dry-run` never prompts (see prd.md "Interactive terminal requirement"), so it
+    // still applies the plain first-enabled rule and fails outright here; default mode
+    // would instead show the tool picker (see tests/tools.rs).
     let fx = Fixture::new();
     fx.init_git();
     fx.write_config(&openai_entry(false), valid_prompts());
     fx.ccm()
-        .args(["--config"])
+        .args(["--dry-run", "--config"])
         .arg(fx.config_dir())
         .assert()
         .code(6);

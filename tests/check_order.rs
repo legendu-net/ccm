@@ -123,7 +123,9 @@ fn config_load_beats_selection() {
 #[test]
 fn selection_beats_diff_generation() {
     // Every entry disabled (stage 5) fails fast, before diff generation (stage 6) --
-    // even with nothing staged, which would otherwise be exit 8.
+    // even with nothing staged, which would otherwise be exit 8. `--dry-run` never
+    // prompts (see "Interactive terminal requirement"), so it still applies the plain
+    // first-enabled rule and fails outright rather than reaching a tool picker.
     let fx = Fixture::new();
     fx.init_git();
     fx.write_config(
@@ -131,7 +133,7 @@ fn selection_beats_diff_generation() {
         "default:\n  template: x\n",
     );
     fx.ccm()
-        .args(["--config"])
+        .args(["--dry-run", "--config"])
         .arg(fx.config_dir())
         .assert()
         .code(6);

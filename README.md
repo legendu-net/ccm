@@ -30,9 +30,10 @@ both files (never overwriting an existing one). See `prd.md`'s "Configuration" s
 for the full field reference (`type: openai_api` vs `type: agent_cli`, `headers`,
 `timeout`, `{{prompt}}`/`{{model}}`/`{{system}}` substitution, etc.).
 
-Run `ccm --list-tools` to see what's configured. `--tool <NAME>` and `--interactive`/`-i`
-override the first-enabled rule for a single run — the former picks a named entry
-outright (even a disabled one), the latter prompts you to pick one from a numbered menu.
+Run `ccm --list-tools` to see what's configured. `--tool <NAME>` picks a named entry
+outright for a single run (even a disabled one). Absent `--tool`, `ccm` uses the first
+enabled entry whenever that's unambiguous; in default mode (not `--dry-run`), if zero or
+2+ entries are enabled, it prompts you to pick one from a numbered menu instead.
 
 ## CLI flags
 
@@ -46,7 +47,6 @@ outright (even a disabled one), the latter prompts you to pick one from a number
 | `-g`, `--gen-config` | Create the config directory and example files, then exit. |
 | `-l`, `--list-tools` | List the `api.yaml` entries (name, type, enabled/disabled), then exit. |
 | `-t`, `--tool <NAME>` | Use this `api.yaml` entry for this run, regardless of its `enabled` flag. |
-| `-i`, `--interactive` | Pick the tool/API interactively from a numbered list. |
 
 ## Exit codes
 
@@ -71,7 +71,7 @@ earliest-listed stage below wins.
 | 11 | Malformed response (`openai_api` only) |
 | 12 | Editor unavailable — `$EDITOR` doesn't resolve, or is unset with no `nvim`/`vim`/`vi` on `$PATH` |
 | 13 | Editor aborted — `$EDITOR` exited non-zero |
-| 14 | Aborted — an interactive picker (the `--interactive` tool picker, or the jj commit-command picker) was cancelled (EOF on stdin) |
+| 14 | Aborted — an interactive picker (the tool picker in default mode, or the jj commit-command picker) was cancelled (EOF on stdin) |
 | 15 | Empty commit message |
 | 16 | Commit failed — the `git commit`/`jj commit`\|`describe`\|`split` invocation failed |
 | 17 | Temp file creation/write failed |

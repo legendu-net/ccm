@@ -145,19 +145,30 @@ fn list_tools_output_is_on_stdout_and_stderr_stays_empty() {
 }
 
 #[test]
-fn interactive_tool_prompt_is_on_stderr_and_stdout_holds_only_the_message() {
+fn tool_picker_prompt_is_on_stderr_and_never_leaks_to_stdout() {
+    // Default mode with two enabled entries: the tool picker's menu/prompt must stay
+    // on stderr, same as every other progress line, even though this is the one prompt
+    // that runs before diff generation rather than at the very end.
     let fx = Fixture::new();
     fx.init_git();
-    fx.write_valid_config(); // a single agent_cli entry named "a"
+    fx.write_script("ccm-test-agent-a", "echo 'feat: test commit message'");
+    fx.write_script("ccm-test-agent-b", "echo 'feat: other commit message'");
+    fx.write_config(
+        "- name: a\n  type: agent_cli\n  prompt: default\n  command: ccm-test-agent-a\n  model: m\n  args: []\n\
+         - name: b\n  type: agent_cli\n  prompt: default\n  command: ccm-test-agent-b\n  model: m\n  args: []\n",
+        "default:\n  template: write a commit message\n",
+    );
     fx.write("a.txt", "hello\n");
     fx.stage("a.txt");
+    fx.write_script("ed", "exit 0");
     fx.ccm()
-        .args(["--interactive", "--dry-run", "--config"])
+        .env("EDITOR", "ed")
+        .args(["--config"])
         .arg(fx.config_dir())
         .write_stdin("0\n")
         .assert()
         .code(0)
-        .stdout("feat: test commit message\n")
+        .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("Select a tool"));
 }
 

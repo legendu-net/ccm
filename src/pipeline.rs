@@ -95,18 +95,28 @@ pub fn run(
     // Stage 5: tool/API selection — a trivial list scan with no probing of any kind
     // (see "Selection"), so an unmatched `--tool <NAME>` (or, under `--dry-run`, an
     // api.yaml with every entry disabled) fails fast before diff generation ever runs.
-    // `--tool` overrides everything else outright, including selecting a disabled
-    // entry. Absent that,
-    // `--dry-run` always takes the first enabled entry (there's no one to ask, and the
-    // Neovim wrapper needs this to run unattended). In default mode, the same
-    // first-enabled rule applies as long as there's no real choice to make — exactly one
-    // entry enabled; otherwise (zero enabled, or 2+ enabled) a human is presumably at the
-    // keyboard already (default mode already needs `$EDITOR` and, under jj, the
-    // commit-command picker), so `ccm` prompts for one of `loaded.entries` instead (never
-    // empty — an empty api.yaml is already `ConfigError::Empty` at stage 4).
-    let selected = if let Some(name) = cli.tool.as_deref() {
+    // Three cases, in priority order:
+    //   1. `--tool <NAME>` with a non-empty NAME overrides everything else outright,
+    //      including selecting a disabled entry.
+    //   2. `--tool ''` (an empty NAME) is a sentinel forcing the picker below
+    //      regardless of `--dry-run` or how many entries are enabled — a deliberate,
+    //      one-off request to browse every entry (including disabled ones) without
+    //      touching api.yaml, so unlike case 3 it's allowed to need interactive stdin
+    //      even under `--dry-run` (see "Interactive terminal requirement").
+    //   3. Absent `--tool` entirely, `--dry-run` always takes the first enabled entry
+    //      (there's no one to ask, and the Neovim wrapper needs this to run
+    //      unattended); in default mode, the same first-enabled rule applies as long
+    //      as there's no real choice to make — exactly one entry enabled; otherwise
+    //      (zero enabled, or 2+ enabled) a human is presumably at the keyboard already
+    //      (default mode already needs `$EDITOR` and, under jj, the commit-command
+    //      picker), so `ccm` prompts for one of `loaded.entries` instead (never
+    //      empty — an empty api.yaml is already `ConfigError::Empty` at stage 4).
+    let force_picker = matches!(cli.tool.as_deref(), Some(""));
+    let selected = if let Some(name) = cli.tool.as_deref().filter(|name| !name.is_empty()) {
         config::validate::select_by_name(&loaded.entries, name)?
-    } else if cli.dry_run || config::validate::enabled_count(&loaded.entries) == 1 {
+    } else if !force_picker
+        && (cli.dry_run || config::validate::enabled_count(&loaded.entries) == 1)
+    {
         config::validate::select_first_enabled(&loaded.entries)?
     } else {
         let lines = config::listing::lines(&loaded.entries);
@@ -580,5 +590,76 @@ mod tests {
         assert_eq!(err.exit_code().as_u8(), 8);
         let printed = String::from_utf8(stderr).unwrap();
         assert!(!printed.contains("Select a tool"));
+    }
+
+    #[test]
+    fn empty_tool_flag_forces_the_picker_despite_a_single_enabled_entry() {
+        // `--tool ''` is the force-picker sentinel: even with exactly one entry
+        // enabled ("a"; "b" disabled) — which would otherwise silently select "a"
+        // without prompting (see `single_enabled_entry_selects_silently_without_prompting`)
+        // — it must show the picker, and let the user reach the disabled entry "b".
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new()
+        };
+        let mut cli = base_cli();
+        cli.tool = Some(String::new());
+        cli.config = Some(config_dir);
+        // "1" picks "b", the disabled entry; nothing is staged, so selection succeeding
+        // (rather than being skipped) surfaces as exit 8 at the next stage.
+        let mut stdin = std::io::Cursor::new(b"1\n".to_vec());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(printed.contains("Select a tool"));
+    }
+
+    #[test]
+    fn empty_tool_flag_forces_the_picker_even_under_dry_run() {
+        // Unlike the automatic `--dry-run` path (no `--tool` at all), which never
+        // prompts, `--tool ''` is a deliberate one-off ask and is allowed to need
+        // interactive stdin even under `--dry-run` — so EOF'd stdin here cancels with
+        // exit 14, not the usual dry-run silent-first-enabled behavior.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new()
+        };
+        let mut cli = base_cli();
+        cli.dry_run = true;
+        cli.tool = Some(String::new());
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 14);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(printed.contains("Select a tool"));
     }
 }

@@ -268,7 +268,10 @@ Flags:
     picker (see Selection) — including selecting an entry whose `enabled` is `false`.
     Matches `name:` exactly, byte-for-byte and case-sensitive, the same comparison
     `api.yaml`'s own name-uniqueness check uses. If no entry has that name, that's a
-    selection failure (exit code 6), same as "every entry disabled."
+    selection failure (exit code 6), same as "every entry disabled." A `NAME` of `''`
+    (an empty string) is a sentinel instead of a name to match: it forces the tool
+    picker for this run, regardless of `--dry-run` or how many entries are enabled — see
+    Selection and "Interactive terminal requirement."
 
 Passing both `--include` and `--exclude` in the same invocation is a usage error (exit code 2).
 Passing `--include` or `--exclude` while the repository is being handled as git (a plain
@@ -297,21 +300,28 @@ as an aborted edit (exit code 13, see "Default behavior").
 Default mode can add a third stdin prompt — the tool picker (see "Selection") — at
 stage 5, before diff generation: whenever the automatic "first `enabled: true` entry"
 rule can't resolve to a single entry on its own (zero enabled, or 2+ enabled) and no
-`--tool <NAME>` was given. Same EOF-cancels behavior as the jj commit-command picker
-(exit code 14).
+non-empty `--tool <NAME>` was given. Same EOF-cancels behavior as the jj commit-command
+picker (exit code 14).
 
-`--dry-run` has no interactive-terminal requirement at all: it never opens `$EDITOR`,
-never reads the jj-command picker's stdin prompt, and never shows the tool picker either
-— absent `--tool`, it always takes the first `enabled: true` entry regardless of how many
-entries are enabled (exit code 6 if none are). So it runs correctly with stdin/stdout
-piped, redirected, or absent entirely (see "Default behavior", "jj commit commands", and
-"Selection"). This split is deliberate, matching the two ways `ccm` is meant to be used
-(see Goal): default mode is for direct interactive use of `ccm` from a shell, so it's
-free to ask when the tool choice is ambiguous, while `--dry-run` is what a non-interactive
-caller — chiefly the thin Neovim Lua wrapper described in Goal, which only needs the
-generated message text on stdout to build its own UI around — is expected to use instead,
-so it never prompts for anything; a caller with 2+ enabled entries that wants to run
-`--dry-run` unattended selects one explicitly with `--tool <NAME>`.
+`--dry-run` otherwise has no interactive-terminal requirement at all: absent `--tool`, it
+never opens `$EDITOR`, never reads the jj-command picker's stdin prompt, and never shows
+the tool picker either — it always takes the first `enabled: true` entry regardless of
+how many entries are enabled (exit code 6 if none are). So it runs correctly with
+stdin/stdout piped, redirected, or absent entirely (see "Default behavior", "jj commit
+commands", and "Selection"). This split is deliberate, matching the two ways `ccm` is
+meant to be used (see Goal): default mode is for direct interactive use of `ccm` from a
+shell, so it's free to ask when the tool choice is ambiguous, while `--dry-run` is what a
+non-interactive caller — chiefly the thin Neovim Lua wrapper described in Goal, which
+only needs the generated message text on stdout to build its own UI around — is expected
+to use instead, so it never prompts for anything on its own; a caller with 2+ enabled
+entries that wants to run `--dry-run` unattended selects one explicitly with `--tool
+<NAME>`.
+
+The one exception: `--tool ''` (see CLI Interface) forces the tool picker regardless of
+`--dry-run`, since typing it is a deliberate, one-off request — not something an
+unattended wrapper does by accident — so `--dry-run --tool ''` still needs interactive
+stdin for that prompt (EOF cancels it the same way, exit code 14), even though
+`--dry-run` otherwise skips every prompt in the run.
 
 ### Diff generation
 
@@ -920,9 +930,10 @@ entries share a `name`, or any entry references a prompt name that isn't defined
 `prompts.yaml`, that's a config error (exit 5) — `ccm` doesn't attempt selection at all,
 and it doesn't matter whether the offending entry would otherwise have been enabled.
 
-`api.yaml` is a priority-ordered list. Absent `--tool` (below), `ccm` selects the first
-entry with `enabled: true` — nothing more — whenever that's unambiguous: under
-`--dry-run`, always; in default mode, whenever exactly one entry is enabled. There is
+`api.yaml` is a priority-ordered list. Absent a non-empty `--tool <NAME>` (below), `ccm`
+selects the first entry with `enabled: true` — nothing more — whenever that's
+unambiguous: under `--dry-run`, always (unless `--tool ''` forces the picker, below); in
+default mode, whenever exactly one entry is enabled. There is
 deliberately no local "availability" probe of any kind here (no checking that an
 `agent_cli`'s `command` resolves on `$PATH`, no reachability check for an `openai_api`'s
 `base_url`, no validation of `model` against either tool's own model list): Requirement 4
@@ -935,18 +946,26 @@ dropped).
 `--tool <NAME>` (see CLI Interface) chooses the entry a different way for one run,
 without touching `api.yaml` itself — this is a per-invocation override, not a second
 fallback tier, so Requirement 4's "no fallback" still holds: exactly one entry is still
-tried, it's just chosen a different way. It selects the entry whose `name` matches
-`NAME` exactly — the same byte-for-byte, case-sensitive comparison used for the
-uniqueness check above — regardless of its `enabled` flag; a disabled entry is a
+tried, it's just chosen a different way. A non-empty `NAME` selects the entry whose
+`name` matches it exactly — the same byte-for-byte, case-sensitive comparison used for
+the uniqueness check above — regardless of its `enabled` flag; a disabled entry is a
 legitimate target. No match is a selection failure (exit 6), same as "every entry
-disabled."
+disabled." (Since entry names aren't required to be non-empty, an entry literally named
+`""` — not a config anyone would write intentionally — couldn't be reached this way;
+it would still be reachable through the picker itself, just not by typing its name.)
 
-In default mode, absent `--tool`, whenever the first-enabled rule can't resolve to a
-single entry on its own — zero entries enabled, or 2+ enabled — `ccm` instead prints the
-same name/type/enabled listing `--list-tools` does, as a numbered stdin menu, and selects
+An empty `NAME` (`--tool ''`) is not a name to match at all: it's a sentinel that forces
+the picker below for this run, regardless of `--dry-run` or `enabled_count` — a
+deliberate, one-off way to browse every entry, including disabled ones, without editing
+`api.yaml` (e.g. to try a normally-disabled tool/API).
+
+In default mode absent a non-empty `--tool`, whenever the first-enabled rule can't
+resolve to a single entry on its own — zero entries enabled, or 2+ enabled — or,
+regardless of mode, whenever `--tool ''` was given, `ccm` instead prints the same
+name/type/enabled listing `--list-tools` does, as a numbered stdin menu, and selects
 whichever entry the user picks, regardless of `enabled` (so a disabled entry stays
-selectable this way, same as `--tool`). A blank line at the prompt (Enter with no index
-typed) selects the entry marked `(default)` in that listing — the same one
+selectable this way, same as a named `--tool`). A blank line at the prompt (Enter with no
+index typed) selects the entry marked `(default)` in that listing — the same one
 `select_first_enabled` would pick automatically when there's exactly one enabled entry —
 without needing to type its number; when nothing is enabled there is no `(default)`
 entry, so a blank line simply re-prompts there too, the same as any other invalid input.
@@ -954,8 +973,10 @@ Cancelling the prompt (EOF on stdin before a valid choice) is exit 14, not exit 
 tool *was* available to select — the user simply didn't finish picking one (see
 "Interactive terminal requirement"); EOF is a separate signal from a blank line and is
 unaffected by the default — it still cancels even when one is available. Note the mode
-split: this prompt never appears under `--dry-run`, which always applies the first-enabled
-rule regardless of how many entries are enabled (see "Interactive terminal requirement").
+split: absent `--tool` entirely, this prompt never appears under `--dry-run`, which
+always applies the first-enabled rule regardless of how many entries are enabled; `--tool
+''` is the one way to reach it under `--dry-run` too (see "Interactive terminal
+requirement").
 
 Either way, the name-uniqueness and prompt-reference validation above still runs first,
 unconditionally — a `--tool` run or a tool-picker prompt is never reached with an
@@ -1000,15 +1021,17 @@ later stages are never reached:
 4. **Config load & validation** — reading, parsing, and cross-validating
    `prompts.yaml`/`api.yaml` from the config directory (the default described under
    `--config` in Flags, or the directory given via `--config`) (exit code 5).
-5. **Tool/API selection** — if `--tool <NAME>` was given, the entry it names (exit code 6
-   if no entry has that name); otherwise the first `enabled` entry in `api.yaml`, taken
-   automatically whenever that's unambiguous (always under `--dry-run`; in default mode,
-   whenever exactly one entry is enabled — exit code 6 if none are enabled under
-   `--dry-run`), or, in default mode when it isn't unambiguous (zero or 2+ entries
-   enabled), whichever entry the tool picker's stdin prompt selects (exit code 14 if
-   cancelled — see "Selection"). This runs before diff generation: it's a trivial list
-   scan (or, in default mode, possibly a stdin prompt) with no probing of any kind, so a
-   failure here — an `api.yaml` with every entry disabled under `--dry-run`, an unmatched
+5. **Tool/API selection** — if a non-empty `--tool <NAME>` was given, the entry it names
+   (exit code 6 if no entry has that name); if `--tool ''` was given, whichever entry the
+   tool picker's stdin prompt selects, regardless of mode (exit code 14 if cancelled);
+   otherwise the first `enabled` entry in `api.yaml`, taken automatically whenever that's
+   unambiguous (always under `--dry-run`; in default mode, whenever exactly one entry is
+   enabled — exit code 6 if none are enabled under `--dry-run`), or, in default mode when
+   it isn't unambiguous (zero or 2+ entries enabled), whichever entry the tool picker's
+   stdin prompt selects (exit code 14 if cancelled — see "Selection"). This runs before
+   diff generation: it's a trivial list scan (or, in default mode, or under `--tool ''`
+   in any mode, possibly a stdin prompt) with no probing of any kind, so a failure here —
+   an `api.yaml` with every entry disabled under `--dry-run`, an unmatched non-empty
    `--tool` name, or a cancelled tool-picker prompt — fails fast without first paying for
    a potentially large diff.
 6. **Diff generation** — for jj with `--include`/`--exclude`, first running the `jj diff
@@ -1056,7 +1079,7 @@ before 15 in the table.
 | 3 | `--gen-config` failed — could not create the config directory (the default described under `--config` in Flags, or the directory given via `--config`) or write `prompts.yaml`/`api.yaml` (e.g. permission denied, disk full, path exists as a non-directory) |
 | 4 | Not a git or jj repository |
 | 5 | Config error — `api.yaml`/`prompts.yaml` missing, unreadable (e.g. permission denied), fails to parse, fails validation (including a duplicate `name` across `api.yaml` entries), references an unknown prompt, or `api.yaml` is an empty list; looked up in the config directory (the default described under `--config` in Flags, or the directory given via `--config`) |
-| 6 | Tool/API selection failed — every `api.yaml` entry is disabled, or `--tool <NAME>` matched no entry (see "Selection") |
+| 6 | Tool/API selection failed — under `--dry-run` with no `--tool`, every `api.yaml` entry is disabled (default mode instead prompts in this case — see "Selection"), or a non-empty `--tool <NAME>` matched no entry |
 | 7 | Diff generation failed — the underlying `git diff`/`jj diff` invocation itself errored; for jj with `--include`/`--exclude` this also covers the `jj diff --summary` enumeration call failing (see "Diff scope resolution") |
 | 8 | Nothing to diff — no staged changes (git), or an empty working-copy diff (jj) after applying `--include`/`--exclude` |
 | 9 | API key resolution failed |
@@ -1064,7 +1087,7 @@ before 15 in the table.
 | 11 | Malformed response — `openai_api` only: the response could not be parsed, or parsed but missing the expected message content. Not applicable to `agent_cli`, whose output is raw stdout text; a bad `agent_cli` result surfaces as exit code 10 (non-zero exit) or exit code 15 (blank result), never 11. |
 | 12 | Editor unavailable — `$EDITOR` is set but doesn't resolve to an executable, or `$EDITOR` is unset and none of `nvim`/`vim`/`vi` are found on `$PATH` |
 | 13 | Editor aborted — `$EDITOR` (or the `nvim`/`vim`/`vi` fallback) exited with a non-zero status. The temp file's content is not read, and nothing is committed, regardless of what was saved before the editor exited. |
-| 14 | Aborted — an interactive stdin picker was cancelled (EOF before a valid selection): either the tool picker at stage 5, default mode only (see "Selection"), or the jj-command picker at stage 8 (see "jj commit commands"). In the stage-8 case, nothing is committed. |
+| 14 | Aborted — an interactive stdin picker was cancelled (EOF before a valid selection): either the tool picker at stage 5 — default mode, or any mode when `--tool ''` was given (see "Selection") — or the jj-command picker at stage 8 (see "jj commit commands"). In the stage-8 case, nothing is committed. |
 | 15 | Empty commit message — blank after the applicable check (see "Message pre-population and cleanup"): under `--dry-run`, the tool/API response — after the response-cleanup pass (see "Response cleanup") — is empty or all whitespace, checked immediately; otherwise, the `$EDITOR`-saved file is blank after cleanup, checked after `$EDITOR` closes, since the user may have written one in over a blank generation. |
 | 16 | Commit failed — `git commit` / `jj commit`\|`describe`\|`split` invocation failed |
 | 17 | Temp file creation/write failed — creating the `$EDITOR` temp file (e.g. `tempfile::Builder::new().prefix("CCM_EDITMSG_").tempfile_in(...)` erroring because the OS temp directory is unwritable or the disk is full) or writing the pre-populated content into it failed. Falls between exit codes 12 and 13 in the pipeline (see "Check order" above); listed here, out of numeric sequence, to avoid renumbering 13–16. |

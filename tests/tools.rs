@@ -1,9 +1,10 @@
 //! `--list-tools`, `--tool <NAME>`, and default mode's tool picker (prd.md "Selection",
 //! "Check order") through the real binary: the listing short-circuit (like
 //! `--gen-config`, it needs no repo), the `--tool` override (including selecting a
-//! disabled entry, and exit 6 for an unmatched name), and the tool picker default mode
-//! shows whenever the first-enabled rule can't resolve on its own (selection,
-//! reprompting on invalid input, and exit 14 on cancellation).
+//! disabled entry, and exit 6 for an unmatched name), the `--tool ''` force-picker
+//! sentinel, and the tool picker default mode shows whenever the first-enabled rule
+//! can't resolve on its own (selection, reprompting on invalid input, and exit 14 on
+//! cancellation).
 
 mod common;
 
@@ -102,6 +103,29 @@ fn tool_flag_with_unknown_name_is_exit_6() {
         .stderr(predicate::str::contains("no-such-tool"));
 }
 
+#[test]
+fn empty_tool_flag_forces_the_picker_onto_a_disabled_entry_under_dry_run() {
+    // `--tool ''` is the force-picker sentinel: "a" is the sole enabled entry (which
+    // `--dry-run` would otherwise take silently, with no prompt at all — see
+    // tool_flag_selects_a_disabled_entry's sibling, dry_run's own no-tool-flag tests in
+    // tests/stdio.rs), but `--tool ''` must still show the picker and let the user
+    // reach the disabled entry "b" without touching api.yaml.
+    let fx = Fixture::new();
+    fx.init_git();
+    write_two_tool_config(&fx);
+    fx.write("f.txt", "hello\n");
+    fx.stage("f.txt");
+
+    fx.ccm()
+        .args(["--tool", "", "--dry-run", "--config"])
+        .arg(fx.config_dir())
+        .write_stdin("1\n")
+        .assert()
+        .code(0)
+        .stdout("feat: from b\n")
+        .stderr(predicate::str::contains("Select a tool"));
+}
+
 /// A fake `$EDITOR` that copies the temp file's pre-populated content (the generated
 /// message the tool picker's choice produced, plus the `#CCM:` comment) to `marker`
 /// before overwriting the temp file with a fixed, always-committable message — so the
@@ -133,6 +157,34 @@ fn no_tool_flag_picker_selects_the_second_entry() {
     fx.ccm()
         .env("EDITOR", "ed")
         .args(["--config"])
+        .arg(fx.config_dir())
+        .write_stdin("1\n")
+        .assert()
+        .code(0)
+        .stderr(predicate::str::contains("Select a tool"));
+    let captured = std::fs::read_to_string(&marker).unwrap();
+    assert!(captured.starts_with("feat: from b"));
+}
+
+#[test]
+fn empty_tool_flag_forces_the_picker_onto_a_disabled_entry_in_default_mode() {
+    // The motivating scenario: only "a" is enabled (which default mode would
+    // otherwise take silently, see single_enabled_entry_selects_silently_in_default_mode),
+    // but `--tool ''` must still show the picker and let picking index 1 reach the
+    // disabled entry "b" — proven by the actual generated message, not just an exit
+    // code, since a weaker assertion couldn't tell "picker ran and picked b" apart from
+    // "picker ran and picked a" or any other outcome that still reaches the editor.
+    let fx = Fixture::new();
+    fx.init_git();
+    write_two_tool_config(&fx);
+    fx.write("f.txt", "hello\n");
+    fx.stage("f.txt");
+    let marker = fx.tmp_dir().join("captured.txt");
+    install_capturing_editor(&fx, &marker);
+
+    fx.ccm()
+        .env("EDITOR", "ed")
+        .args(["--tool", "", "--config"])
         .arg(fx.config_dir())
         .write_stdin("1\n")
         .assert()

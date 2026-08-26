@@ -45,6 +45,7 @@ pub struct Cli {
     pub list_tools: bool,
 
     /// Use this api.yaml entry by name for this run, regardless of its `enabled` flag.
+    /// An empty NAME ('') forces the tool picker for this run instead, in any mode.
     #[arg(short = 't', long, value_name = "NAME")]
     pub tool: Option<String>,
 }

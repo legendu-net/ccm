@@ -22,6 +22,7 @@ use crate::env::Environment;
 use crate::error::{CcmError, EditorError, UsageError};
 use crate::generation;
 use crate::picker;
+use crate::progress;
 use crate::repo::{self, RepoHandling};
 use crate::vcs::scope::Selection;
 use std::io::BufRead;
@@ -107,6 +108,7 @@ pub fn run(
         let default = config::listing::default_index(&loaded.entries);
         let index =
             picker::prompt_index(stdin, stderr, &lines, default).map_err(picker::to_ccm_error)?;
+        let _ = progress::blank_line(stderr);
         &loaded.entries[index]
     } else {
         config::validate::select_first_enabled(&loaded.entries)?

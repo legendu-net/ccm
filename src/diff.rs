@@ -60,6 +60,7 @@ fn generate_git(cwd: &Path, stderr: &mut dyn std::io::Write) -> Result<DiffResul
         return Err(DiffError::Generation(stderr_text(captured)).into());
     }
     let _ = progress::diff_generated(stderr, &command);
+    let _ = progress::blank_line(stderr);
 
     if captured.stdout.is_empty() {
         return Err(DiffError::Empty.into());
@@ -96,6 +97,13 @@ fn generate_jj(
         return Err(DiffError::Empty.into());
     }
 
+    // A blank line separates the enumeration group (jj_include/exclude only) from the
+    // diff-generation group about to start; for Selection::All there was no
+    // enumeration group above, so no separator is needed here either.
+    if !matches!(selection, scope::Selection::All) {
+        let _ = progress::blank_line(stderr);
+    }
+
     let args = argv::jj_diff_args(&files);
     let command = argv::render_command("jj", &args);
     let _ = progress::generating_diff(stderr, &command);
@@ -105,6 +113,7 @@ fn generate_jj(
         return Err(DiffError::Generation(stderr_text(captured)).into());
     }
     let _ = progress::diff_generated(stderr, &command);
+    let _ = progress::blank_line(stderr);
 
     if captured.stdout.is_empty() {
         return Err(DiffError::Empty.into());

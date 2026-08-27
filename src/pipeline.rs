@@ -133,8 +133,9 @@ pub fn run_with(
     //      empty — an empty api.yaml is already `ConfigError::Empty` at stage 4).
     // The picker itself (case 2 or the ambiguous half of case 3) has two front-ends
     // (prd.md "Selection", "Preferences of Dependencies" item 8): `fzf`, shelled out to
-    // as a subprocess when stdin is a real terminal, or the numbered stdin prompt
-    // otherwise (including whenever `fzf` isn't on `$PATH` or fails to run).
+    // as a subprocess when stdin is a real terminal and `CCM_FUZZY` isn't `0`, or the
+    // numbered stdin prompt otherwise (including whenever `fzf` isn't on `$PATH` or
+    // fails to run).
     let force_picker = matches!(cli.tool.as_deref(), Some(""));
     let selected = if let Some(name) = cli.tool.as_deref().filter(|name| !name.is_empty()) {
         config::validate::select_by_name(&loaded.entries, name)?
@@ -149,7 +150,9 @@ pub fn run_with(
         // in that case, same as any other invalid input. `fzf` has no equivalent of a
         // blank line: Enter always confirms whichever candidate is highlighted.
         let default = config::listing::default_index(&loaded.entries);
-        let index = if env.stdin_is_terminal() {
+        let fzf_enabled =
+            env.stdin_is_terminal() && !fzf::disabled_by_env(env.var("CCM_FUZZY").as_deref());
+        let index = if fzf_enabled {
             match fzf_picker.select(&cwd, &lines) {
                 fzf::FzfOutcome::Selected(i) => i,
                 fzf::FzfOutcome::Cancelled => {
@@ -958,6 +961,75 @@ mod tests {
         let err =
             run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
         assert_eq!(err.exit_code().as_u8(), 14);
+    }
+
+    #[test]
+    fn ccm_fuzzy_zero_skips_fzf_for_the_numbered_prompt_even_on_a_terminal() {
+        // A real terminal is present, so fzf would normally be tried — but `CCM_FUZZY=0`
+        // forces the numbered prompt instead: a PanickingFzf must not fire, and the "1"
+        // on stdin drives the numbered prompt straight through to diff generation.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_enabled_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new()
+                .with_stdin_is_terminal(true)
+                .with_var("CCM_FUZZY", "0")
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(b"1\n".to_vec());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err =
+            run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(printed.contains("Select a tool"));
+        assert!(!printed.contains("fzf unavailable"));
+    }
+
+    #[test]
+    fn ccm_fuzzy_set_to_a_non_zero_value_still_uses_fzf() {
+        // Only the exact value "0" is the escape hatch; anything else leaves fzf on.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_enabled_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new()
+                .with_stdin_is_terminal(true)
+                .with_var("CCM_FUZZY", "1")
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let fzf_picker = FakeFzf(fzf::FzfOutcome::Selected(1));
+        let err = run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &fzf_picker).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(!printed.contains("Select a tool"));
     }
 
     #[test]

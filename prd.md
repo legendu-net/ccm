@@ -307,9 +307,10 @@ Default mode can add a fourth stdin prompt — the tool picker (see "Selection")
 stage 5, before diff generation: whenever the automatic "first `enabled: true` entry"
 rule can't resolve to a single entry on its own (zero enabled, or 2+ enabled) and no
 non-empty `--tool <NAME>` was given. This prompt has two front-ends (see "Selection" and
-"Preferences of Dependencies" item 8) — `fzf` when it's on `$PATH` and stdin is a real
-usable terminal, a numbered stdin prompt otherwise — but the interactive-terminal
-requirement and the EOF/abort-cancels-with-exit-14 behavior are identical either way.
+"Preferences of Dependencies" item 8) — `fzf` when it's on `$PATH`, stdin is a real
+usable terminal, and `CCM_FUZZY` isn't `0`; a numbered stdin prompt otherwise — but the
+interactive-terminal requirement and the EOF/abort-cancels-with-exit-14 behavior are
+identical either way.
 
 `--dry-run` otherwise has no interactive-terminal requirement at all: absent `--tool`, it
 never shows the message review prompt, never opens `$EDITOR`, never reads the
@@ -1050,16 +1051,25 @@ regardless of how many entries are enabled; `--tool ''` is the one way to reach 
 
 The tool picker has two front-ends over that one candidate list (see "Preferences of
 Dependencies" item 8): `fzf` (https://github.com/junegunn/fzf), shelled out to as a
-subprocess when it's found on `$PATH` and stdin is a real terminal, and a plain numbered
-stdin prompt otherwise — the only front-end that exists at all if `fzf` isn't installed,
-and the one every scripted/piped caller always gets regardless. The two differ only in
-how a selection is made and are otherwise identical: same candidate order, same
-disabled-entry selectability, same exit 14 on cancellation (EOF for the numbered prompt;
-an explicit abort — Esc, Ctrl-C, or confirming with nothing matched — for `fzf`). If
-`fzf` can't run for any reason (not found, stdin isn't actually a working terminal
-despite `stdin_is_terminal()` reporting true, or it exits with anything other than a
-clean selection or an explicit abort), `ccm` notes why on stderr and falls back to the
+subprocess when it's found on `$PATH`, stdin is a real terminal, and the environment
+variable `CCM_FUZZY` is not set to `0`; and a plain numbered stdin prompt otherwise —
+the only front-end that exists at all if `fzf` isn't installed, and the one every
+scripted/piped caller always gets regardless. The two differ only in how a selection is
+made and are otherwise identical: same candidate order, same disabled-entry
+selectability, same exit 14 on cancellation (EOF for the numbered prompt; an explicit
+abort — Esc, Ctrl-C, or confirming with nothing matched — for `fzf`). If `fzf` can't run
+for any reason (not found, stdin isn't actually a working terminal despite
+`stdin_is_terminal()` reporting true, or it exits with anything other than a clean
+selection or an explicit abort), `ccm` notes why on stderr and falls back to the
 numbered prompt on stdin — behavior is never worse than without `fzf` installed.
+
+`CCM_FUZZY=0` is an escape hatch for the opposite case: a terminal where `fzf` *does*
+start but its inline TUI renders or behaves badly. Setting it to exactly `0` makes `ccm`
+skip the `fzf` front-end entirely and go straight to the numbered prompt, with no
+"fzf unavailable" note on stderr (nothing went wrong — it wasn't attempted). Any other
+value, including unset or empty, leaves `fzf` enabled. It has no effect on any other
+part of the run and none on `--dry-run` without `--tool ''` (which never reaches the
+tool picker at all).
 
 One behavior is specific to the numbered prompt and doesn't carry over: a blank line
 (Enter with no index typed) selects the entry marked `(default)` in the listing — the
@@ -1117,9 +1127,10 @@ later stages are never reached:
    `--config` in Flags, or the directory given via `--config`) (exit code 5).
 5. **Tool/API selection** — if a non-empty `--tool <NAME>` was given, the entry it names
    (exit code 6 if no entry has that name); if `--tool ''` was given, whichever entry the
-   tool picker selects (`fzf` if it's on `$PATH` and stdin is a real usable terminal, a
-   numbered stdin prompt otherwise — see "Selection"), regardless of mode (exit code 14
-   if cancelled); otherwise the first `enabled` entry in `api.yaml`, taken automatically
+   tool picker selects (`fzf` if it's on `$PATH`, stdin is a real usable terminal, and
+   `CCM_FUZZY` isn't `0`; a numbered stdin prompt otherwise — see "Selection"),
+   regardless of mode (exit code 14 if cancelled); otherwise the first `enabled` entry in
+   `api.yaml`, taken automatically
    whenever that's unambiguous (always under `--dry-run`; in default mode, whenever
    exactly one entry is enabled — exit code 6 if none are enabled under `--dry-run`), or,
    in default mode when it isn't unambiguous (zero or 2+ entries enabled), whichever
@@ -1272,10 +1283,12 @@ before 15 in the table.
       interactive rendering and keyboard input go through `/dev/tty` directly,
       independent of how `ccm` has wired its stdin/stdout/stderr.
     - It's only attempted when stdin is a real terminal (see "Interactive terminal
-      requirement"); if `fzf` isn't found on `$PATH`, doesn't have a controlling
-      terminal available to it, or fails for any other reason, `ccm` notes why on
-      stderr and falls back to the numbered stdin prompt the tool picker has always
-      had — behavior is never worse than without `fzf` installed.
+      requirement") and `CCM_FUZZY` isn't set to `0` (an escape hatch for a terminal
+      that mishandles `fzf`'s inline TUI — see "Selection"); if `fzf` isn't found on
+      `$PATH`, doesn't have a controlling terminal available to it, or fails for any
+      other reason, `ccm` notes why on stderr and falls back to the numbered stdin
+      prompt the tool picker has always had — behavior is never worse than without
+      `fzf` installed.
     - This adds no new dependency to `Cargo.toml` at all: `ccm` builds and runs
       identically whether or not `fzf` happens to be on the user's machine, exactly
       like its optional `nvim`/`vim`/`vi` `$EDITOR` fallback chain (see "Default

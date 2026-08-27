@@ -57,9 +57,12 @@ entries are enabled, it prompts you to pick one from that same picker instead.
 
 On a real terminal, if [`fzf`](https://github.com/junegunn/fzf) is installed, the tool
 picker shells out to it for fuzzy search; otherwise (or if `fzf` fails to start for any
-reason) it's a plain numbered stdin menu. No `Cargo.toml` dependency either way — this is
-a purely optional, runtime-detected subprocess, the same way `$EDITOR`'s `nvim`/`vim`/`vi`
-fallback chain works whether or not any of those happen to be installed.
+reason) it's a plain numbered stdin menu. Set `CCM_FUZZY` to exactly `0` to skip `fzf`
+and always get the numbered menu — useful for a terminal that mishandles `fzf`'s inline
+UI. No
+`Cargo.toml` dependency either way — this is a purely optional, runtime-detected
+subprocess, the same way `$EDITOR`'s `nvim`/`vim`/`vi` fallback chain works whether or not
+any of those happen to be installed.
 
 ## CLI flags
 

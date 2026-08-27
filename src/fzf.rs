@@ -8,7 +8,9 @@
 //! controlling terminal available, or fails any other way, the caller (`pipeline.rs`,
 //! stage 5) falls back to `picker::prompt_index` — this module adds no new
 //! `Cargo.toml` dependency and no way for a run to end up worse off than without `fzf`
-//! installed.
+//! installed. Setting `CCM_FUZZY=0` (see [`disabled_by_env`]) makes that same caller
+//! skip the `fzf` front-end outright — the escape hatch for a terminal that mishandles
+//! `fzf`'s inline TUI (prd.md "Selection").
 //!
 //! Deliberately does **not** go through `vcs::exec::run_capture` (used for git/jj/
 //! agent_cli): that helper puts the child in its own new process group
@@ -54,6 +56,15 @@ pub enum FzfOutcome {
 /// own doc comment and the plan's manual verification steps for that.
 pub trait Fzf {
     fn select(&self, cwd: &Path, lines: &[String]) -> FzfOutcome;
+}
+
+/// Whether `$CCM_FUZZY` is set to exactly `0` — the escape hatch (prd.md "Selection")
+/// for forcing the numbered stdin prompt even on a real terminal, e.g. one that
+/// mishandles `fzf`'s inline TUI. Pass `env.var("CCM_FUZZY").as_deref()`. Any other
+/// value, including unset or empty, leaves the `fzf` front-end enabled.
+#[must_use]
+pub fn disabled_by_env(ccm_fuzzy: Option<&str>) -> bool {
+    ccm_fuzzy == Some("0")
 }
 
 /// The real, production front-end: shells out via [`select`].
@@ -170,6 +181,20 @@ mod tests {
             stdout: stdout.as_bytes().to_vec(),
             stderr: Vec::new(),
         })
+    }
+
+    #[test]
+    fn ccm_fuzzy_zero_disables_the_fzf_front_end() {
+        assert!(disabled_by_env(Some("0")));
+    }
+
+    #[test]
+    fn ccm_fuzzy_unset_or_any_other_value_leaves_it_enabled() {
+        assert!(!disabled_by_env(None));
+        assert!(!disabled_by_env(Some("")));
+        assert!(!disabled_by_env(Some("1")));
+        assert!(!disabled_by_env(Some("false")));
+        assert!(!disabled_by_env(Some("00")));
     }
 
     #[test]

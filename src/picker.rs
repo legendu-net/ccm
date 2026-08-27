@@ -196,11 +196,12 @@ pub enum ReviewAction {
 }
 
 /// Interprets one byte of review-prompt input: `r`/`R` is always
-/// [`ReviewAction::Regenerate`]; `e`/`E` is always [`ReviewAction::Edit`]; a space or
-/// Enter (`\n`/`\r`) is the prompt's default action — [`ReviewAction::Accept`] when
-/// `allow_accept` (a non-blank generated message), or [`ReviewAction::Edit`] otherwise,
-/// since a blank generation has nothing worth accepting (see "Message review prompt").
-/// Any other byte is a retry (`None`).
+/// [`ReviewAction::Regenerate`]; `e`/`E` is always [`ReviewAction::Edit`]; `a`/`A` is
+/// [`ReviewAction::Accept`] when `allow_accept` (and a retry otherwise, since a blank
+/// generation offers no accept option); a space or Enter (`\n`/`\r`) is the prompt's
+/// default action — [`ReviewAction::Accept`] when `allow_accept` (a non-blank generated
+/// message), or [`ReviewAction::Edit`] otherwise, since a blank generation has nothing
+/// worth accepting (see "Message review prompt"). Any other byte is a retry (`None`).
 ///
 /// Ctrl-D (`0x04`) is deliberately not classified here: unlike every other
 /// unrecognized byte, it doesn't mean "keep asking, try again" — it cancels the prompt
@@ -210,6 +211,7 @@ pub fn interpret_action(byte: u8, allow_accept: bool) -> Option<ReviewAction> {
     match byte {
         b'r' | b'R' => Some(ReviewAction::Regenerate),
         b'e' | b'E' => Some(ReviewAction::Edit),
+        b'a' | b'A' if allow_accept => Some(ReviewAction::Accept),
         b' ' | b'\n' | b'\r' => Some(if allow_accept {
             ReviewAction::Accept
         } else {
@@ -221,7 +223,7 @@ pub fn interpret_action(byte: u8, allow_accept: bool) -> Option<ReviewAction> {
 
 fn print_action_menu(writer: &mut (impl Write + ?Sized), allow_accept: bool) {
     if allow_accept {
-        let _ = write!(writer, "[R]egenerate  [E]dit  [Space/Enter] accept: ");
+        let _ = write!(writer, "[R]egenerate  [E]dit  [Space/Enter/A]ccept: ");
     } else {
         let _ = write!(writer, "[R]egenerate  [Space/Enter] edit: ");
     }
@@ -258,7 +260,7 @@ fn drain_rest_of_line(
 }
 
 /// Runs the message review prompt (prd.md "Message review prompt") to a selection:
-/// prints `[R]egenerate  [E]dit  [Space/Enter] accept: ` (or, when `allow_accept` is
+/// prints `[R]egenerate  [E]dit  [Space/Enter/A]ccept: ` (or, when `allow_accept` is
 /// `false` — the generated message is blank — `[R]egenerate  [Space/Enter] edit: `),
 /// reads a single byte, and repeats on any input [`interpret_action`] doesn't
 /// recognize.
@@ -599,11 +601,20 @@ mod tests {
     }
 
     #[test]
+    fn interpret_action_accept_key_is_case_insensitive_when_allowed() {
+        assert_eq!(interpret_action(b'a', true), Some(ReviewAction::Accept));
+        assert_eq!(interpret_action(b'A', true), Some(ReviewAction::Accept));
+    }
+
+    #[test]
     fn interpret_action_default_is_edit_when_accept_not_allowed() {
         // A blank generation has nothing worth accepting, so Space/Enter falls back to
-        // Edit instead — and Accept is unreachable no matter what key is pressed.
+        // Edit instead — and Accept is unreachable no matter what key is pressed, the
+        // explicit `a`/`A` accept key included (it's a retry then).
         assert_eq!(interpret_action(b' ', false), Some(ReviewAction::Edit));
         assert_eq!(interpret_action(b'\n', false), Some(ReviewAction::Edit));
+        assert_eq!(interpret_action(b'a', false), None);
+        assert_eq!(interpret_action(b'A', false), None);
     }
 
     #[test]
@@ -630,6 +641,14 @@ mod tests {
     }
 
     #[test]
+    fn prompt_action_selects_accept_on_a_key() {
+        let mut input = Cursor::new(b"a\n".to_vec());
+        let mut output = Vec::new();
+        let action = prompt_action(&mut input, &mut output, true, false).unwrap();
+        assert_eq!(action, ReviewAction::Accept);
+    }
+
+    #[test]
     fn prompt_action_blank_line_accepts_when_allowed() {
         let mut input = Cursor::new(b"\n".to_vec());
         let mut output = Vec::new();
@@ -651,7 +670,7 @@ mod tests {
         let mut output = Vec::new();
         prompt_action(&mut input, &mut output, true, false).unwrap();
         let printed = String::from_utf8(output).unwrap();
-        assert!(printed.contains("[R]egenerate  [E]dit  [Space/Enter] accept: "));
+        assert!(printed.contains("[R]egenerate  [E]dit  [Space/Enter/A]ccept: "));
     }
 
     #[test]
@@ -672,7 +691,7 @@ mod tests {
         assert_eq!(action, ReviewAction::Accept);
         let printed = String::from_utf8(output).unwrap();
         // Printed once for the invalid "z", once more for the winning blank line.
-        assert_eq!(printed.matches("[Space/Enter] accept").count(), 2);
+        assert_eq!(printed.matches("[Space/Enter/A]ccept").count(), 2);
     }
 
     #[test]

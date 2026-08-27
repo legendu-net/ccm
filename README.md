@@ -21,16 +21,16 @@ ccm --dry-run             # just print the generated message to stdout
 After generation, `ccm` shows the message and asks what to do with it:
 
 ```
-[R]egenerate  [E]dit  [Space/Enter] accept:
+[R]egenerate  [E]dit  [Space/Enter/A]ccept:
 ```
 
 | Key | Action |
 |---|---|
 | `r` / `R` | Regenerate — re-run generation against the same tool/API and the same diff, then ask again. |
 | `e` / `E` | Edit — open the message in `$EDITOR`, same as before. |
-| Space or Enter | Accept — commit the message as-is, skipping `$EDITOR`. |
+| `a` / `A`, Space, or Enter | Accept — commit the message as-is, skipping `$EDITOR`. |
 
-No Enter is needed for `r`/`e` on a real terminal; when stdin isn't a terminal (piped,
+No Enter is needed for `r`/`e`/`a` on a real terminal; when stdin isn't a terminal (piped,
 scripted), the same keys work a line at a time instead. If generation came back blank,
 there's nothing to accept, so only regenerate/edit are offered, with edit as the default.
 

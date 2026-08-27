@@ -629,7 +629,7 @@ single keypress, and a poor one can be thrown away and re-requested without leav
 `ccm` at all.
 
 ```
-[R]egenerate  [E]dit  [Space/Enter] accept:
+[R]egenerate  [E]dit  [Space/Enter/A]ccept:
 ```
 
 or, when generation came back blank (nothing worth accepting yet):
@@ -645,12 +645,12 @@ or, when generation came back blank (nothing worth accepting yet):
     run.
 - **Edit** (`e`/`E`) opens `$EDITOR` on the current message exactly as `ccm` always did
     before this prompt existed (see "Message pre-population and cleanup" below).
-- **Accept** (a space, or Enter/blank line) commits the current message as-is, skipping
-    `$EDITOR` entirely. It runs through the same `#CCM: `-comment cleanup and blank check
-    `$EDITOR`'s own save would (see "Message pre-population and cleanup" below), so an
-    accepted message commits byte-identically to an edit that changed nothing, and the
-    pathological case of a message that's nothing but `#CCM: ` lines still hits exit 15
-    rather than committing garbage.
+- **Accept** (`a`/`A`, a space, or Enter/blank line) commits the current message as-is,
+    skipping `$EDITOR` entirely. It runs through the same `#CCM: `-comment cleanup and
+    blank check `$EDITOR`'s own save would (see "Message pre-population and cleanup"
+    below), so an accepted message commits byte-identically to an edit that changed
+    nothing, and the pathological case of a message that's nothing but `#CCM: ` lines
+    still hits exit 15 rather than committing garbage.
 - Accept is only offered when the current message is non-blank: a blank generation has
     nothing worth accepting (accepting it would just be exit 15 with extra steps), so the
     prompt instead offers only regenerate/edit, with a space or Enter defaulting to edit

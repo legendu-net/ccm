@@ -93,7 +93,7 @@ fn enter_accepts_without_ever_opening_the_editor() {
         .write_stdin("\n")
         .assert()
         .code(0)
-        .stderr(predicate::str::contains("[Space/Enter] accept"));
+        .stderr(predicate::str::contains("[Space/Enter/A]ccept"));
 
     assert!(
         !marker.exists(),
@@ -182,7 +182,7 @@ fn invalid_input_reprints_the_prompt_before_accepting() {
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert_eq!(
-        stderr.matches("[Space/Enter] accept").count(),
+        stderr.matches("[Space/Enter/A]ccept").count(),
         2,
         "expected one reprint for the invalid \"z\", then the winning blank line, in:\n{stderr}"
     );

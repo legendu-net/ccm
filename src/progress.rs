@@ -116,6 +116,17 @@ pub fn blank_line(out: &mut (impl Write + ?Sized)) -> io::Result<()> {
     writeln!(out)
 }
 
+/// Logged once the tool picker's `fzf` front-end couldn't run (not on `$PATH`, no
+/// controlling terminal, or any other failure — see `fzf::FzfOutcome::Unavailable`)
+/// before `ccm` falls back to the numbered stdin prompt, so the fallback doesn't look
+/// like it happened for no reason.
+pub fn fzf_unavailable(out: &mut (impl Write + ?Sized), reason: &str) -> io::Result<()> {
+    writeln!(
+        out,
+        "fzf unavailable ({reason}), falling back to the numbered picker"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

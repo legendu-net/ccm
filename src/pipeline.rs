@@ -20,6 +20,7 @@ use crate::diff;
 use crate::editor;
 use crate::env::Environment;
 use crate::error::{CcmError, EditorError, UsageError};
+use crate::fzf;
 use crate::generation;
 use crate::picker;
 use crate::progress;
@@ -31,7 +32,9 @@ use std::io::BufRead;
 /// stdout (`--gen-config`'s report, or the raw message under `--dry-run`); `stderr`
 /// receives every progress line and the jj commit-command picker's prompts (prd.md
 /// "Progress logging" — always stderr, regardless of `--dry-run`); `stdin` feeds the
-/// picker.
+/// picker. Uses the real `fzf` subprocess (`fzf::RealFzf`) as the tool picker's fuzzy
+/// front-end — see [`run_with`] to substitute a different one (tests only; production
+/// code should always call this).
 ///
 /// # Errors
 /// Any pipeline stage's failure, mapped to its documented exit code via
@@ -42,6 +45,23 @@ pub fn run(
     stdin: &mut dyn BufRead,
     out: &mut dyn std::io::Write,
     stderr: &mut dyn std::io::Write,
+) -> Result<(), CcmError> {
+    run_with(cli, env, stdin, out, stderr, &fzf::RealFzf)
+}
+
+/// Same as [`run`], but with the tool picker's fuzzy front-end injected — the seam
+/// [`fzf::Fzf`] exists for (see its doc comment). Split out so `run`'s own signature
+/// never has to change for this.
+///
+/// # Errors
+/// Same as [`run`].
+pub fn run_with(
+    cli: &Cli,
+    env: &dyn Environment,
+    stdin: &mut dyn BufRead,
+    out: &mut dyn std::io::Write,
+    stderr: &mut dyn std::io::Write,
+    fzf_picker: &dyn fzf::Fzf,
 ) -> Result<(), CcmError> {
     // Stage 1: argument-shape usage errors.
     cli::validate_shape(cli)?;
@@ -111,6 +131,10 @@ pub fn run(
     //      (default mode already needs `$EDITOR` and, under jj, the commit-command
     //      picker), so `ccm` prompts for one of `loaded.entries` instead (never
     //      empty — an empty api.yaml is already `ConfigError::Empty` at stage 4).
+    // The picker itself (case 2 or the ambiguous half of case 3) has two front-ends
+    // (prd.md "Selection", "Preferences of Dependencies" item 8): `fzf`, shelled out to
+    // as a subprocess when stdin is a real terminal, or the numbered stdin prompt
+    // otherwise (including whenever `fzf` isn't on `$PATH` or fails to run).
     let force_picker = matches!(cli.tool.as_deref(), Some(""));
     let selected = if let Some(name) = cli.tool.as_deref().filter(|name| !name.is_empty()) {
         config::validate::select_by_name(&loaded.entries, name)?
@@ -122,10 +146,24 @@ pub fn run(
         let lines = config::listing::lines(&loaded.entries);
         // A blank line at the prompt selects the same entry the `(default)` marker
         // above names — `None` when nothing is enabled, so a blank line just re-prompts
-        // in that case, same as any other invalid input.
+        // in that case, same as any other invalid input. `fzf` has no equivalent of a
+        // blank line: Enter always confirms whichever candidate is highlighted.
         let default = config::listing::default_index(&loaded.entries);
-        let index =
-            picker::prompt_index(stdin, stderr, &lines, default).map_err(picker::to_ccm_error)?;
+        let index = if env.stdin_is_terminal() {
+            match fzf_picker.select(&cwd, &lines) {
+                fzf::FzfOutcome::Selected(i) => i,
+                fzf::FzfOutcome::Cancelled => {
+                    return Err(picker::to_ccm_error(picker::PickerError::Cancelled));
+                }
+                fzf::FzfOutcome::Unavailable(reason) => {
+                    let _ = progress::fzf_unavailable(stderr, &reason);
+                    picker::prompt_index(stdin, stderr, &lines, default)
+                        .map_err(picker::to_ccm_error)?
+                }
+            }
+        } else {
+            picker::prompt_index(stdin, stderr, &lines, default).map_err(picker::to_ccm_error)?
+        };
         let _ = progress::blank_line(stderr);
         &loaded.entries[index]
     };
@@ -700,5 +738,379 @@ mod tests {
         assert_eq!(err.exit_code().as_u8(), 14);
         let printed = String::from_utf8(stderr).unwrap();
         assert!(printed.contains("Select a tool"));
+    }
+
+    // ---- fzf front-end gating (fzf itself is never actually spawned here — these
+    // exercise the seam `fzf::Fzf` exists for; see fzf.rs's own unit tests for the
+    // exit-code-to-outcome mapping, and the plan's manual verification steps for real
+    // interactive coverage, which can't be automated at all) ----
+
+    struct FakeFzf(fzf::FzfOutcome);
+    impl fzf::Fzf for FakeFzf {
+        fn select(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfOutcome {
+            self.0.clone()
+        }
+    }
+
+    /// Fails the test if the tool picker ever reaches the fzf front-end at all — used
+    /// to guard the cases where it must not even be attempted (piped stdin, an
+    /// unambiguous automatic selection, `--tool <NAME>` bypassing the picker outright).
+    struct PanickingFzf;
+    impl fzf::Fzf for PanickingFzf {
+        fn select(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfOutcome {
+            panic!("fzf should not have been invoked in this test");
+        }
+    }
+
+    struct RecordingFzf {
+        outcome: fzf::FzfOutcome,
+        received: std::cell::RefCell<Option<Vec<String>>>,
+    }
+    impl fzf::Fzf for RecordingFzf {
+        fn select(&self, _cwd: &std::path::Path, lines: &[String]) -> fzf::FzfOutcome {
+            *self.received.borrow_mut() = Some(lines.to_vec());
+            self.outcome.clone()
+        }
+    }
+
+    #[test]
+    fn fzf_selection_picks_that_entry() {
+        // Both entries enabled (ambiguous, so the picker triggers), terminal present:
+        // fzf must be tried, and its answer must be what gets selected — not the
+        // numbered prompt, which never runs (stdin is EOF'd here, so if the numbered
+        // prompt ran instead it would cancel with exit 14, not reach diff generation).
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_enabled_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let fzf_picker = FakeFzf(fzf::FzfOutcome::Selected(1));
+        let err = run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &fzf_picker).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(!printed.contains("Select a tool"));
+    }
+
+    #[test]
+    fn fzf_receives_the_same_lines_list_tools_would_print() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_enabled_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir.clone());
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let fzf_picker = RecordingFzf {
+            outcome: fzf::FzfOutcome::Selected(0),
+            received: std::cell::RefCell::new(None),
+        };
+        let _ = run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &fzf_picker);
+        let loaded = config::loader::load(&config_dir).unwrap();
+        assert_eq!(
+            fzf_picker.received.into_inner(),
+            Some(config::listing::lines(&loaded.entries))
+        );
+    }
+
+    #[test]
+    fn fzf_cancelled_surfaces_as_exit_14() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_enabled_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let fzf_picker = FakeFzf(fzf::FzfOutcome::Cancelled);
+        let err = run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &fzf_picker).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 14);
+    }
+
+    #[test]
+    fn fzf_unavailable_falls_back_to_the_numbered_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_enabled_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(b"1\n".to_vec());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let fzf_picker = FakeFzf(fzf::FzfOutcome::Unavailable("fzf not found".to_string()));
+        let err = run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &fzf_picker).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(printed.contains("fzf unavailable"));
+        assert!(printed.contains("Select a tool"));
+    }
+
+    #[test]
+    fn fzf_unavailable_then_eof_still_exits_14() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_enabled_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let fzf_picker = FakeFzf(fzf::FzfOutcome::Unavailable("fzf not found".to_string()));
+        let err = run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &fzf_picker).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 14);
+    }
+
+    #[test]
+    fn piped_stdin_never_reaches_fzf() {
+        // stdin_is_terminal defaults to false — fzf must never even be attempted, so a
+        // PanickingFzf must not panic; the picker falls straight to the numbered
+        // prompt, and EOF'd stdin there cancels with exit 14 same as ever.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_enabled_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new()
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err =
+            run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 14);
+    }
+
+    #[test]
+    fn non_empty_tool_flag_bypasses_fzf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_enabled_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.tool = Some("b".to_string());
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err =
+            run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+    }
+
+    #[test]
+    fn empty_tool_flag_forces_fzf_when_terminal() {
+        // Exactly one entry enabled ("a"; "b" disabled) would otherwise select
+        // silently without prompting at all — `--tool ''` must still force the picker,
+        // and with a real terminal present, that means fzf specifically.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.tool = Some(String::new());
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let fzf_picker = FakeFzf(fzf::FzfOutcome::Selected(1));
+        let err = run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &fzf_picker).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(!printed.contains("Select a tool"));
+    }
+
+    #[test]
+    fn empty_tool_flag_forces_fzf_even_under_dry_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.dry_run = true;
+        cli.tool = Some(String::new());
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let fzf_picker = FakeFzf(fzf::FzfOutcome::Cancelled);
+        let err = run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &fzf_picker).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 14);
+    }
+
+    #[test]
+    fn single_enabled_entry_never_reaches_fzf() {
+        // Unambiguous automatic selection — fzf must not even be attempted, terminal
+        // or not.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err =
+            run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+    }
+
+    #[test]
+    fn automatic_dry_run_never_reaches_fzf() {
+        // No `--tool` at all: `--dry-run` always takes the first enabled entry
+        // silently, terminal or not — fzf must not even be attempted.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_enabled_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.dry_run = true;
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err =
+            run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
     }
 }

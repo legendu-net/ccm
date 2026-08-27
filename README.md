@@ -50,10 +50,16 @@ for the full field reference (`type: openai_api` vs `type: agent_cli`, `headers`
 
 Run `ccm --list-tools` to see what's configured. `--tool <NAME>` picks a named entry
 outright for a single run (even a disabled one); `--tool ''` (an empty name) forces the
-numbered picker menu instead, letting you browse every entry — including disabled ones —
-without editing `api.yaml`, regardless of mode. Absent `--tool`, `ccm` uses the first
-enabled entry whenever that's unambiguous; in default mode (not `--dry-run`), if zero or
-2+ entries are enabled, it prompts you to pick one from that same menu instead.
+tool picker instead, letting you browse every entry — including disabled ones — without
+editing `api.yaml`, regardless of mode. Absent `--tool`, `ccm` uses the first enabled
+entry whenever that's unambiguous; in default mode (not `--dry-run`), if zero or 2+
+entries are enabled, it prompts you to pick one from that same picker instead.
+
+On a real terminal, if [`fzf`](https://github.com/junegunn/fzf) is installed, the tool
+picker shells out to it for fuzzy search; otherwise (or if `fzf` fails to start for any
+reason) it's a plain numbered stdin menu. No `Cargo.toml` dependency either way — this is
+a purely optional, runtime-detected subprocess, the same way `$EDITOR`'s `nvim`/`vim`/`vi`
+fallback chain works whether or not any of those happen to be installed.
 
 ## CLI flags
 
@@ -91,7 +97,7 @@ earliest-listed stage below wins.
 | 11 | Malformed response (`openai_api` only) |
 | 12 | Editor unavailable — `$EDITOR` doesn't resolve, or is unset with no `nvim`/`vim`/`vi` on `$PATH` |
 | 13 | Editor aborted — `$EDITOR` exited non-zero |
-| 14 | Aborted — an interactive picker (the tool picker in default mode, or in any mode via `--tool ''`; the message review prompt; or the jj commit-command picker) was cancelled (EOF on stdin) |
+| 14 | Aborted — an interactive picker (the tool picker in default mode, or in any mode via `--tool ''`; the message review prompt; or the jj commit-command picker) was cancelled (EOF on stdin, or an explicit abort in the tool picker's `fzf` front-end) |
 | 15 | Empty commit message |
 | 16 | Commit failed — the `git commit`/`jj commit`\|`describe`\|`split` invocation failed |
 | 17 | Temp file creation/write failed |

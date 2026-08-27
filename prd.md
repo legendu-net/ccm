@@ -306,8 +306,10 @@ aborted edit (exit code 13, see "Default behavior").
 Default mode can add a fourth stdin prompt — the tool picker (see "Selection") — at
 stage 5, before diff generation: whenever the automatic "first `enabled: true` entry"
 rule can't resolve to a single entry on its own (zero enabled, or 2+ enabled) and no
-non-empty `--tool <NAME>` was given. Same EOF-cancels behavior as the jj commit-command
-picker (exit code 14).
+non-empty `--tool <NAME>` was given. This prompt has two front-ends (see "Selection" and
+"Preferences of Dependencies" item 8) — `fzf` when it's on `$PATH` and stdin is a real
+usable terminal, a numbered stdin prompt otherwise — but the interactive-terminal
+requirement and the EOF/abort-cancels-with-exit-14 behavior are identical either way.
 
 `--dry-run` otherwise has no interactive-terminal requirement at all: absent `--tool`, it
 never shows the message review prompt, never opens `$EDITOR`, never reads the
@@ -327,8 +329,11 @@ entries that wants to run `--dry-run` unattended selects one explicitly with `--
 The one exception: `--tool ''` (see CLI Interface) forces the tool picker regardless of
 `--dry-run`, since typing it is a deliberate, one-off request — not something an
 unattended wrapper does by accident — so `--dry-run --tool ''` still needs interactive
-stdin for that prompt (EOF cancels it the same way, exit code 14), even though
-`--dry-run` otherwise skips every prompt in the run.
+stdin for that prompt (whichever front-end applies — cancelling it, by EOF or an explicit
+abort, is exit 14 either way), even though `--dry-run` otherwise skips every prompt in
+the run. Whether `fzf` happens to be installed changes nothing about this: absent
+`--tool` entirely, `--dry-run` never reaches the tool picker at all, so there's nothing
+for `fzf` to be tried against on that path regardless.
 
 ### Diff generation
 
@@ -1033,22 +1038,39 @@ deliberate, one-off way to browse every entry, including disabled ones, without 
 
 In default mode absent a non-empty `--tool`, whenever the first-enabled rule can't
 resolve to a single entry on its own — zero entries enabled, or 2+ enabled — or,
-regardless of mode, whenever `--tool ''` was given, `ccm` instead prints the same
-name/type/enabled listing `--list-tools` does, as a numbered stdin menu, and selects
+regardless of mode, whenever `--tool ''` was given, `ccm` instead shows the tool picker:
+the same name/type/enabled listing `--list-tools` does, in `api.yaml` order, and selects
 whichever entry the user picks, regardless of `enabled` (so a disabled entry stays
-selectable this way, same as a named `--tool`). A blank line at the prompt (Enter with no
-index typed) selects the entry marked `(default)` in that listing — the same one
-`select_first_enabled` would pick automatically when there's exactly one enabled entry —
-without needing to type its number; when nothing is enabled there is no `(default)`
-entry, so a blank line simply re-prompts there too, the same as any other invalid input.
-Cancelling the prompt (EOF on stdin before a valid choice) is exit 14, not exit 6, since a
-tool *was* available to select — the user simply didn't finish picking one (see
-"Interactive terminal requirement"); EOF is a separate signal from a blank line and is
-unaffected by the default — it still cancels even when one is available. Note the mode
-split: absent `--tool` entirely, this prompt never appears under `--dry-run`, which
-always applies the first-enabled rule regardless of how many entries are enabled; `--tool
-''` is the one way to reach it under `--dry-run` too (see "Interactive terminal
-requirement").
+selectable this way, same as a named `--tool`). Cancelling the prompt is exit 14, not exit
+6, since a tool *was* available to select — the user simply didn't finish picking one
+(see "Interactive terminal requirement"). Note the mode split: absent `--tool` entirely,
+this prompt never appears under `--dry-run`, which always applies the first-enabled rule
+regardless of how many entries are enabled; `--tool ''` is the one way to reach it under
+`--dry-run` too (see "Interactive terminal requirement").
+
+The tool picker has two front-ends over that one candidate list (see "Preferences of
+Dependencies" item 8): `fzf` (https://github.com/junegunn/fzf), shelled out to as a
+subprocess when it's found on `$PATH` and stdin is a real terminal, and a plain numbered
+stdin prompt otherwise — the only front-end that exists at all if `fzf` isn't installed,
+and the one every scripted/piped caller always gets regardless. The two differ only in
+how a selection is made and are otherwise identical: same candidate order, same
+disabled-entry selectability, same exit 14 on cancellation (EOF for the numbered prompt;
+an explicit abort — Esc, Ctrl-C, or confirming with nothing matched — for `fzf`). If
+`fzf` can't run for any reason (not found, stdin isn't actually a working terminal
+despite `stdin_is_terminal()` reporting true, or it exits with anything other than a
+clean selection or an explicit abort), `ccm` notes why on stderr and falls back to the
+numbered prompt on stdin — behavior is never worse than without `fzf` installed.
+
+One behavior is specific to the numbered prompt and doesn't carry over: a blank line
+(Enter with no index typed) selects the entry marked `(default)` in the listing — the
+same one `select_first_enabled` would pick automatically when there's exactly one enabled
+entry — without needing to type its number; when nothing is enabled there is no
+`(default)` entry, so a blank line simply re-prompts there too, the same as any other
+invalid input; EOF is a separate signal from a blank line and is unaffected by the
+default — it still cancels even when one is available. `fzf` has no equivalent of a blank
+line: Enter always confirms whichever candidate is highlighted, and the initial highlight
+is the first entry in `api.yaml` order (not necessarily the `(default)`-marked one),
+though that marker is still visible in the list either way.
 
 Either way, the name-uniqueness and prompt-reference validation above still runs first,
 unconditionally — a `--tool` run or a tool-picker prompt is never reached with an
@@ -1095,17 +1117,18 @@ later stages are never reached:
    `--config` in Flags, or the directory given via `--config`) (exit code 5).
 5. **Tool/API selection** — if a non-empty `--tool <NAME>` was given, the entry it names
    (exit code 6 if no entry has that name); if `--tool ''` was given, whichever entry the
-   tool picker's stdin prompt selects, regardless of mode (exit code 14 if cancelled);
-   otherwise the first `enabled` entry in `api.yaml`, taken automatically whenever that's
-   unambiguous (always under `--dry-run`; in default mode, whenever exactly one entry is
-   enabled — exit code 6 if none are enabled under `--dry-run`), or, in default mode when
-   it isn't unambiguous (zero or 2+ entries enabled), whichever entry the tool picker's
-   stdin prompt selects (exit code 14 if cancelled — see "Selection"). This runs before
-   diff generation: it's a trivial list scan (or, in default mode, or under `--tool ''`
-   in any mode, possibly a stdin prompt) with no probing of any kind, so a failure here —
-   an `api.yaml` with every entry disabled under `--dry-run`, an unmatched non-empty
-   `--tool` name, or a cancelled tool-picker prompt — fails fast without first paying for
-   a potentially large diff.
+   tool picker selects (`fzf` if it's on `$PATH` and stdin is a real usable terminal, a
+   numbered stdin prompt otherwise — see "Selection"), regardless of mode (exit code 14
+   if cancelled); otherwise the first `enabled` entry in `api.yaml`, taken automatically
+   whenever that's unambiguous (always under `--dry-run`; in default mode, whenever
+   exactly one entry is enabled — exit code 6 if none are enabled under `--dry-run`), or,
+   in default mode when it isn't unambiguous (zero or 2+ entries enabled), whichever
+   entry the tool picker selects (exit code 14 if cancelled — see "Selection"). This runs
+   before diff generation: it's a trivial list scan (or, in default mode, or under
+   `--tool ''` in any mode, possibly an interactive picker of one front-end or the other)
+   with no probing of any kind, so a failure here — an `api.yaml` with every entry
+   disabled under `--dry-run`, an unmatched non-empty `--tool` name, or a cancelled
+   tool-picker prompt — fails fast without first paying for a potentially large diff.
 6. **Diff generation** — for jj with `--include`/`--exclude`, first running the `jj diff
    --summary` enumeration call (exit code 7 if this subprocess itself fails, see "Diff
    scope resolution"); then resolving `--include`/`--exclude` against the enumerated
@@ -1162,7 +1185,7 @@ before 15 in the table.
 | 11 | Malformed response — `openai_api` only: the response could not be parsed, or parsed but missing the expected message content. Not applicable to `agent_cli`, whose output is raw stdout text; a bad `agent_cli` result surfaces as exit code 10 (non-zero exit) or exit code 15 (blank result), never 11. |
 | 12 | Editor unavailable — `$EDITOR` is set but doesn't resolve to an executable, or `$EDITOR` is unset and none of `nvim`/`vim`/`vi` are found on `$PATH` |
 | 13 | Editor aborted — `$EDITOR` (or the `nvim`/`vim`/`vi` fallback) exited with a non-zero status. The temp file's content is not read, and nothing is committed, regardless of what was saved before the editor exited. |
-| 14 | Aborted — an interactive stdin picker was cancelled (EOF before a valid selection): the tool picker at stage 5 — default mode, or any mode when `--tool ''` was given (see "Selection") — or, at stage 8, the message review prompt (see "Message review prompt") or the jj-command picker (see "jj commit commands"). In the stage-8 cases, nothing is committed. |
+| 14 | Aborted — an interactive picker was cancelled (EOF before a valid selection, or — in the tool picker's `fzf` front-end — an explicit abort): the tool picker at stage 5 — default mode, or any mode when `--tool ''` was given (see "Selection") — or, at stage 8, the message review prompt (see "Message review prompt") or the jj-command picker (see "jj commit commands"). In the stage-8 cases, nothing is committed. |
 | 15 | Empty commit message — blank after the applicable check (see "Message pre-population and cleanup"): under `--dry-run`, the tool/API response — after the response-cleanup pass (see "Response cleanup") — is empty or all whitespace, checked immediately; otherwise, the `$EDITOR`-saved file is blank after cleanup, checked after `$EDITOR` closes, since the user may have written one in over a blank generation. |
 | 16 | Commit failed — `git commit` / `jj commit`\|`describe`\|`split` invocation failed |
 | 17 | Temp file creation/write failed — creating the `$EDITOR` temp file (e.g. `tempfile::Builder::new().prefix("CCM_EDITMSG_").tempfile_in(...)` erroring because the OS temp directory is unwritable or the disk is full) or writing the pre-populated content into it failed. Falls between exit codes 12 and 13 in the pipeline (see "Check order" above); listed here, out of numeric sequence, to avoid renumbering 13–16. |
@@ -1187,7 +1210,11 @@ before 15 in the table.
     choices at a time — `jj commit` plus either `jj describe` or `jj split`, never both
     and never neither — so it doesn't warrant a fuzzy-finder crate like
     https://crates.io/crates/skim. It's implemented as a plain numbered stdin prompt
-    (see "jj commit commands") using only the standard library.
+    (see "jj commit commands") using only the standard library. This reasoning is
+    specific to prompts with a small, fixed choice count: the jj commit-command picker
+    here (never more than two) and the message review prompt (item 7, three actions). It
+    deliberately does *not* extend to the tool picker (see "Selection"), whose candidate
+    list is `api.yaml` itself and is therefore open-ended — see item 8.
 
 4. Use the `clap` crate (https://crates.io/crates/clap), with the `derive` feature, for
     parsing `ccm`'s own command-line arguments (see CLI Interface).
@@ -1221,8 +1248,37 @@ before 15 in the table.
     duration of that one read). Rather than a terminal-UI crate like
     https://crates.io/crates/crossterm or https://crates.io/crates/console, `ccm` uses
     the `term` feature of `nix` (https://crates.io/crates/nix, already a dependency —
-    see item 3 above's reasoning against pulling in a fuzzy-finder crate for a similarly
-    small piece of terminal interaction) to call `tcgetattr`/`tcsetattr` directly. When
-    stdin isn't a real terminal, the prompt falls back to reading a whole line instead
-    (see "Message review prompt"), so this dependency is only ever exercised on a
-    genuine interactive run.
+    see item 3's reasoning, which applies equally to this prompt's fixed three-way
+    choice; the open-ended tool picker is the one deliberate exception, item 8) to call
+    `tcgetattr`/`tcsetattr` directly. When stdin isn't a real terminal, the prompt falls
+    back to reading a whole line instead (see "Message review prompt"), so this
+    dependency is only ever exercised on a genuine interactive run.
+
+8. The tool picker (see "Selection") is the one deliberate exception to items 3 and 7's
+    reasoning against a fuzzy-finder/TUI crate: its candidate list is `api.yaml` itself,
+    which has no bounded size, so fuzzy search over tool names is a genuine usability win
+    once many tools are configured — unlike the jj commit-command picker or the message
+    review prompt, whose choice counts are small and fixed. Rather than embedding a
+    fuzzy-finder *library* (rejected in item 3 for the jj picker, and a poor fit here too
+    — evaluated and declined: https://crates.io/crates/skim pulls in an unconditional,
+    whole-process `#[global_allocator]` override and a native-code build step just to
+    link against it, regardless of which of its own Cargo features are enabled), `ccm`
+    shells out to the `fzf` command-line tool (https://github.com/junegunn/fzf) as an
+    optional subprocess, the same way it already shells out to `git`/`jj` themselves
+    (item 2) rather than embedding a library for those either. Concretely:
+    - `ccm` writes the same candidate list `--list-tools` prints to `fzf`'s stdin and
+      reads the selected line back from its stdout — the standard `command | fzf`
+      idiom, just invoked directly rather than through a shell pipe. `fzf`'s own
+      interactive rendering and keyboard input go through `/dev/tty` directly,
+      independent of how `ccm` has wired its stdin/stdout/stderr.
+    - It's only attempted when stdin is a real terminal (see "Interactive terminal
+      requirement"); if `fzf` isn't found on `$PATH`, doesn't have a controlling
+      terminal available to it, or fails for any other reason, `ccm` notes why on
+      stderr and falls back to the numbered stdin prompt the tool picker has always
+      had — behavior is never worse than without `fzf` installed.
+    - This adds no new dependency to `Cargo.toml` at all: `ccm` builds and runs
+      identically whether or not `fzf` happens to be on the user's machine, exactly
+      like its optional `nvim`/`vim`/`vi` `$EDITOR` fallback chain (see "Default
+      behavior") already works whether or not any of those happen to be installed.
+    - It's scoped to this one prompt. The jj commit-command picker and the message
+      review prompt are unaffected and stay exactly as items 3 and 7 describe.

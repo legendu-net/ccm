@@ -578,16 +578,17 @@ Immediately after stage 7 (Generation) gets a response back from the selected to
 and before that response is used for anything else — printed under `--dry-run`, or shown
 at the message review prompt and, if edit is chosen there, pre-populated into the
 `$EDITOR` temp file (see "Message review prompt" and "Message pre-population and
-cleanup" below) — `ccm` runs it through one cleanup pass: it strips a single Markdown
-code fence
-wrapping the whole response, then a single pair of matching quotation marks wrapping the
-whole response or just its first line. Some LLMs answer with the message inside a
-```…``` block, or as a quoted string (e.g. `"feat: add x"`), regardless of what the
-prompt asks for; centralizing this cleanup here means every caller — the default
-`$EDITOR` flow, `--dry-run`, and any other consumer of `ccm`'s output — gets it for free
-instead of having to reimplement the same cleanup itself (this used to live in the
-Neovim wrapper described in Goal, ad hoc, before the fundamental generation logic moved
-into `ccm`).
+cleanup" below) — `ccm` runs it through one cleanup pass: it trims leading/trailing
+whitespace unconditionally, then strips a single Markdown code fence wrapping the whole
+response, then a single pair of matching quotation marks wrapping the whole response or
+just its first line. Some LLMs answer with the message inside a ```…``` block, or as a
+quoted string (e.g. `"feat: add x"`), regardless of what the prompt asks for; a chatty
+LLM or an `echo`-based `agent_cli` (see Requirement 3) also routinely leaves a trailing
+newline or other stray whitespace even without either wrapper. Centralizing this cleanup
+here means every caller — the default `$EDITOR` flow, `--dry-run`, and any other
+consumer of `ccm`'s output — gets it for free instead of having to reimplement the same
+cleanup itself (this used to live in the Neovim wrapper described in Goal, ad hoc,
+before the fundamental generation logic moved into `ccm`).
 
 - Code fence: the response's first line must be a bare opening fence — a run of at least
     3 backticks, optionally followed by a language tag, and nothing else (a line with
@@ -607,12 +608,12 @@ into `ccm`).
 This pass runs unconditionally, in both `--dry-run` and the default `$EDITOR` flow alike
 — a fenced or quoted response is equally unwanted either way, and it runs before the
 exit-code-15 blank check either mode applies (a response that's exactly an empty fenced
-block, e.g. "``` ```", cleans down to blank and is correctly treated as one). When
-neither transformation applies, the response is returned completely unchanged, byte for
-byte — not even trimmed — which is what keeps `--dry-run`'s stdout output exactly
-matching the tool/API's own response whenever no cleanup was actually needed. When
-something *is* stripped, the result ends up trimmed of surrounding whitespace as a side
-effect of extracting it from around the fence/quotes.
+block, e.g. "``` ```", cleans down to blank and is correctly treated as one, and a
+response that's entirely whitespace trims down to blank the same way). The
+leading/trailing-whitespace trim is unconditional — the result is always at least
+`raw.trim()`, whether or not a fence or quote-wrap also applied — so `--dry-run`'s
+stdout, the message review prompt's displayed text, and `$EDITOR`'s pre-population never
+carry incidental surrounding whitespace the tool/API happened to answer with.
 
 This step is orthogonal to the `#CCM: `-comment cleanup described next: that one strips
 scaffolding `ccm` itself writes into the `$EDITOR` temp file, while this one cleans up

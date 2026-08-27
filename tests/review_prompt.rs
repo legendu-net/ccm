@@ -232,6 +232,6 @@ fn dry_run_never_shows_the_review_prompt() {
         .arg(fx.config_dir())
         .assert()
         .code(0)
-        .stdout("feat: test commit message\n")
+        .stdout("feat: test commit message") // trimmed of the "echo"-appended newline
         .stderr(predicate::str::contains("accept").not());
 }

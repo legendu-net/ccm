@@ -2,22 +2,19 @@
 //! "Response cleanup"). Pure. Applied once, in `generation::generate`, right after the
 //! backend call returns and before the blank check — so it reaches both `--dry-run`'s
 //! stdout print and the `$EDITOR` pre-population the same way, and neither has to
-//! reimplement it.
+//! reimplement it. Always trims leading/trailing whitespace, on top of unwrapping a
+//! code fence or quoted string when either is present.
 
-/// Strips a wrapping Markdown code fence, then a wrapping pair of quotation marks, from
-/// `raw`. Returns `raw` completely unchanged — not even trimmed — when neither applies;
-/// this is what keeps `--dry-run`'s stdout output byte-exact with the tool/API's own
-/// response whenever no cleanup is actually needed.
+/// Trims `raw` of leading/trailing whitespace, then strips a wrapping Markdown code
+/// fence, then a wrapping pair of quotation marks — unconditionally: the result is
+/// always at least `raw.trim()`, even when neither the fence nor the quote-wrap
+/// applies, so no incidental surrounding whitespace ever reaches `--dry-run`'s stdout,
+/// the message review prompt, or `$EDITOR`'s pre-population.
 #[must_use]
 pub fn clean_message(raw: &str) -> String {
     let trimmed = raw.trim();
     let defenced = strip_code_fence(trimmed);
-    let cleaned = strip_surrounding_quotes(&defenced);
-    if cleaned == trimmed {
-        raw.to_string()
-    } else {
-        cleaned
-    }
+    strip_surrounding_quotes(&defenced)
 }
 
 /// Strips a single Markdown code fence wrapping the whole message. Some LLMs answer with
@@ -127,10 +124,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clean_message_leaves_a_plain_message_completely_unchanged() {
-        // Byte-exact, including the trailing newline — no fence, no quotes, nothing to
-        // clean, so nothing is even trimmed.
-        assert_eq!(clean_message("feat: add x\n"), "feat: add x\n");
+    fn clean_message_trims_a_plain_message_with_no_fence_or_quotes() {
+        // No fence, no quotes — but the trailing newline is still stripped
+        // unconditionally, not left as a side effect of some other transformation.
+        assert_eq!(clean_message("feat: add x\n"), "feat: add x");
+    }
+
+    #[test]
+    fn clean_message_trims_leading_and_trailing_whitespace_with_nothing_else_to_clean() {
+        assert_eq!(clean_message("  feat: add x  \n"), "feat: add x");
     }
 
     #[test]
@@ -205,11 +207,11 @@ mod tests {
     }
 
     #[test]
-    fn clean_message_of_an_all_whitespace_response_is_left_unchanged() {
-        // Nothing to strip, so nothing is trimmed either — the caller's own blank check
-        // (`message.trim().is_empty()`) is what turns this into exit 15, not this
-        // function collapsing it to "".
-        assert_eq!(clean_message("   \n\t\n"), "   \n\t\n");
+    fn clean_message_of_an_all_whitespace_response_collapses_to_blank() {
+        // The unconditional trim collapses this to "" itself now — the caller's blank
+        // check (`message.trim().is_empty()`) still catches it either way (exit 15), but
+        // it no longer needs to see the raw whitespace to do so.
+        assert_eq!(clean_message("   \n\t\n"), "");
     }
 
     #[test]

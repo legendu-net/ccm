@@ -89,7 +89,7 @@ fn tool_flag_selects_a_disabled_entry() {
         .arg(fx.config_dir())
         .assert()
         .code(0)
-        .stdout("feat: from b\n");
+        .stdout("feat: from b"); // trimmed of the "echo"-appended trailing newline
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn empty_tool_flag_forces_the_picker_onto_a_disabled_entry_under_dry_run() {
         .write_stdin("1\n")
         .assert()
         .code(0)
-        .stdout("feat: from b\n")
+        .stdout("feat: from b") // trimmed of the "echo"-appended trailing newline
         .stderr(predicate::str::contains("Select a tool"));
 }
 

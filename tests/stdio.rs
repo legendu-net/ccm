@@ -21,7 +21,10 @@ fn ready(fx: &Fixture) {
 }
 
 #[test]
-fn dry_run_stdout_is_byte_exact_with_no_added_newline() {
+fn dry_run_stdout_is_trimmed_of_surrounding_whitespace() {
+    // The fake agent_cli's own output is "feat: test commit message\n" (echo appends a
+    // trailing newline); response cleanup (cleanup::clean_message) trims that
+    // unconditionally, so --dry-run's stdout carries no trailing newline of its own.
     let fx = Fixture::new();
     ready(&fx);
     fx.ccm()
@@ -29,7 +32,7 @@ fn dry_run_stdout_is_byte_exact_with_no_added_newline() {
         .arg(fx.config_dir())
         .assert()
         .code(0)
-        .stdout("feat: test commit message\n"); // the fake agent_cli's own exact output
+        .stdout("feat: test commit message");
 }
 
 #[test]

@@ -2,7 +2,9 @@
 //! jj-only prompt asking whether to restrict the diff to specific files before diff
 //! generation runs, and — when the answer is yes — an `fzf` multi-select (with a
 //! per-file diff preview) or, when `fzf` isn't available, a numbered stdin fallback,
-//! over the working copy's changed files.
+//! over the working copy's changed files. Skipped entirely — no prompt at all — when
+//! the working copy has at most one changed file: with nothing to actually choose
+//! between, asking would be pointless.
 //!
 //! Reuses the same enumeration call `diff::generate`'s jj `--include`/`--exclude`
 //! path uses (`diff::enumerate_jj`, `vcs::summary::parse_summary`), so the candidate
@@ -11,7 +13,7 @@
 //! discovered differently (typed patterns vs. picked from a list).
 
 use crate::diff;
-use crate::error::{CcmError, DiffError};
+use crate::error::CcmError;
 use crate::fzf;
 use crate::picker;
 use crate::progress;
@@ -20,17 +22,23 @@ use crate::vcs::summary::SummaryEntry;
 use std::io::BufRead;
 use std::path::Path;
 
-/// Runs the "restrict the diff to specific files?" prompt to completion and resolves
-/// it to a [`Selection`]:
-/// - No (the default, a bare Enter) -> [`Selection::All`], nothing enumerated or
-///   logged — identical to a run that never triggered this prompt at all.
-/// - Yes, then every candidate marked -> also [`Selection::All`]: this collapse keeps
-///   "select everything" indistinguishable from declining, rather than making
-///   `files` non-empty for no real restriction — which would otherwise flip the jj
-///   commit-command picker from `[D]escribe` to `[S]plit` (see `commit.rs`) and `jj
-///   split` the entire working copy for nothing.
-/// - Yes, then a proper subset marked -> [`Selection::Explicit`] with those paths, in
-///   candidate (first-seen enumeration) order.
+/// Enumerates the working copy and resolves it to a [`Selection`], prompting
+/// interactively only when there's an actual choice to make:
+/// - At most one changed file (zero or one) -> [`Selection::All`] immediately, no
+///   prompt shown at all: restricting to a subset and diffing the whole working copy
+///   already mean the same thing then, so there's nothing worth asking about. Zero
+///   changed files still surfaces as the usual "nothing to diff" exit 8 once
+///   `diff::generate` runs on the resulting `Selection::All`.
+/// - Two or more changed files, then No (the default, a bare Enter) -> also
+///   [`Selection::All`].
+/// - Two or more changed files, then Yes, then every candidate marked -> also
+///   [`Selection::All`]: this collapse keeps "select everything" indistinguishable
+///   from declining, rather than making `files` non-empty for no real restriction —
+///   which would otherwise flip the jj commit-command picker from `[D]escribe` to
+///   `[S]plit` (see `commit.rs`) and `jj split` the entire working copy for nothing.
+/// - Two or more changed files, then Yes, then a proper subset marked ->
+///   [`Selection::Explicit`] with those paths, in candidate (first-seen enumeration)
+///   order.
 ///
 /// `fzf_enabled` is `!fzf::disabled_by_env(...)` — the caller (`pipeline.rs`) only
 /// calls this function at all once its own `env.stdin_is_terminal()` guard has
@@ -40,10 +48,8 @@ use std::path::Path;
 /// raw-mode concept of their own.
 ///
 /// # Errors
-/// [`crate::error::PickerCancelled`] (exit 14) if either prompt is cancelled;
-/// [`DiffError::Empty`] (exit 8) if the working copy has nothing changed to enumerate
-/// once "yes" is answered — showing an empty picker would be pointless; any error
-/// [`diff::enumerate_jj`] itself can surface (exit 7).
+/// Any error [`diff::enumerate_jj`] itself can surface (exit 7); otherwise
+/// [`crate::error::PickerCancelled`] (exit 14) if either prompt is cancelled.
 pub fn resolve_interactively(
     cwd: &Path,
     stdin: &mut dyn BufRead,
@@ -52,19 +58,19 @@ pub fn resolve_interactively(
     fzf_enabled: bool,
     raw: bool,
 ) -> Result<Selection, CcmError> {
+    let entries = diff::enumerate_jj(cwd, stderr)?;
+    let targets = dedup_targets(&entries);
+    if targets.len() <= 1 {
+        return Ok(Selection::All);
+    }
+
     let restrict = picker::prompt_yes_no(stdin, stderr, raw).map_err(picker::to_ccm_error)?;
     let _ = progress::section_break(stderr);
     if !restrict {
         return Ok(Selection::All);
     }
 
-    let entries = diff::enumerate_jj(cwd, stderr)?;
-    if entries.is_empty() {
-        return Err(DiffError::Empty.into());
-    }
-    let targets = dedup_targets(&entries);
     let lines = candidate_lines(&entries, &targets);
-
     let indices = if fzf_enabled {
         match fzf_picker.select_files(cwd, &lines) {
             fzf::FzfMultiOutcome::Selected(indices) => indices,
@@ -195,31 +201,54 @@ mod tests {
     }
 
     #[test]
-    fn no_answer_returns_all_without_enumerating() {
+    fn zero_changed_files_skips_the_prompt_and_returns_all() {
         let (_tmp, repo) = jj_repo();
-        // Deliberately no files written: if this enumerated, the (still-empty)
-        // working copy would surface as DiffError::Empty rather than `Selection::All`.
+        // No stdin at all: if the prompt were shown, EOF would cancel it (exit 14)
+        // rather than returning a selection.
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut stderr = Vec::new();
+        let selection =
+            resolve_interactively(&repo, &mut stdin, &mut stderr, &PanickingFzf, true, false)
+                .unwrap();
+        assert_eq!(selection, Selection::All);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(!printed.contains("Restrict the diff to specific files?"));
+    }
+
+    #[test]
+    fn one_changed_file_skips_the_prompt_and_returns_all() {
+        let (_tmp, repo) = jj_repo();
+        std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut stderr = Vec::new();
+        let selection =
+            resolve_interactively(&repo, &mut stdin, &mut stderr, &PanickingFzf, true, false)
+                .unwrap();
+        assert_eq!(selection, Selection::All);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(!printed.contains("Restrict the diff to specific files?"));
+    }
+
+    #[test]
+    fn two_changed_files_no_answer_returns_all() {
+        let (_tmp, repo) = jj_repo();
+        std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
+        std::fs::write(repo.join("b.rs"), "world\n").unwrap();
         let mut stdin = std::io::Cursor::new(b"n\n".to_vec());
         let mut stderr = Vec::new();
         let selection =
             resolve_interactively(&repo, &mut stdin, &mut stderr, &PanickingFzf, true, false)
                 .unwrap();
         assert_eq!(selection, Selection::All);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(printed.contains("Restrict the diff to specific files?"));
     }
 
     #[test]
-    fn yes_then_no_changes_is_exit_8() {
+    fn two_changed_files_no_answer_is_exit_14() {
         let (_tmp, repo) = jj_repo();
-        let mut stdin = std::io::Cursor::new(b"y\n".to_vec());
-        let mut stderr = Vec::new();
-        let err = resolve_interactively(&repo, &mut stdin, &mut stderr, &PanickingFzf, true, false)
-            .unwrap_err();
-        assert_eq!(err.exit_code().as_u8(), 8);
-    }
-
-    #[test]
-    fn yes_no_answer_is_exit_14() {
-        let (_tmp, repo) = jj_repo();
+        std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
+        std::fs::write(repo.join("b.rs"), "world\n").unwrap();
         let mut stdin = std::io::Cursor::new(Vec::new());
         let mut stderr = Vec::new();
         let err = resolve_interactively(&repo, &mut stdin, &mut stderr, &PanickingFzf, true, false)
@@ -261,6 +290,7 @@ mod tests {
     fn fzf_cancelled_is_exit_14() {
         let (_tmp, repo) = jj_repo();
         std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
+        std::fs::write(repo.join("b.rs"), "world\n").unwrap();
         let mut stdin = std::io::Cursor::new(b"y\n".to_vec());
         let mut stderr = Vec::new();
         let fzf_picker = FakeFilesFzf(fzf::FzfMultiOutcome::Cancelled);

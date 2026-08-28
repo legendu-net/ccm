@@ -1264,6 +1264,10 @@ mod tests {
     #[test]
     fn jj_default_mode_terminal_reaches_the_file_picker() {
         let (_tmp, repo) = jj_repo();
+        // Two changed files: the picker only prompts once there's an actual choice
+        // (see `jj_default_mode_terminal_with_one_changed_file_skips_the_picker`).
+        std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
+        std::fs::write(repo.join("b.rs"), "world\n").unwrap();
         let config_dir = repo.parent().unwrap().join("config");
         write_two_entry_config(&config_dir);
         let env = FakeEnvironment {
@@ -1280,6 +1284,44 @@ mod tests {
         assert_eq!(err.exit_code().as_u8(), 14);
         let printed = String::from_utf8(stderr).unwrap();
         assert!(printed.contains("Restrict the diff to specific files?"));
+    }
+
+    #[test]
+    fn jj_default_mode_terminal_with_one_changed_file_skips_the_picker() {
+        // Restricting to a subset and diffing the whole working copy already mean
+        // the same thing with only one file changed, so the prompt is skipped
+        // outright. Since the one file really did change, diff generation succeeds
+        // and the run proceeds into message generation (unlike every other gating
+        // test here, which relies on "nothing staged" to stop early) — a 1s call
+        // timeout on the (unreachable) `http://x` backend keeps this fast and
+        // network-independent regardless of how that resolves; this test only
+        // checks the prompt never appeared.
+        let (_tmp, repo) = jj_repo();
+        std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
+        let config_dir = repo.parent().unwrap().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("prompts.yaml"),
+            "default:\n  template: write it\n",
+        )
+        .unwrap();
+        std::fs::write(
+            config_dir.join("api.yaml"),
+            "- name: a\n  type: openai_api\n  prompt: default\n  base_url: http://x\n  model: m\n  timeout: 1\n  api_key:\n    env: K\n",
+        )
+        .unwrap();
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let _ = run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(!printed.contains("Restrict the diff to specific files?"));
     }
 
     #[test]
@@ -1384,10 +1426,27 @@ mod tests {
     #[test]
     fn jj_file_picker_answered_no_proceeds_to_diff_generation_unrestricted() {
         // Declining the prompt must behave exactly as if it had never been shown —
-        // same exit 8 "nothing staged" every other unrestricted-scope test hits.
+        // the diff generation call that follows must be the plain, unscoped
+        // `jj diff` (no trailing file arguments), not one restricted to either file.
+        // Two changed files (rather than nothing staged) so the prompt actually
+        // appears; a 1s call timeout on the (unreachable) `http://x` backend keeps
+        // this fast and network-independent regardless of how message generation,
+        // which necessarily runs next, resolves.
         let (_tmp, repo) = jj_repo();
+        std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
+        std::fs::write(repo.join("b.rs"), "world\n").unwrap();
         let config_dir = repo.parent().unwrap().join("config");
-        write_two_entry_config(&config_dir);
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("prompts.yaml"),
+            "default:\n  template: write it\n",
+        )
+        .unwrap();
+        std::fs::write(
+            config_dir.join("api.yaml"),
+            "- name: a\n  type: openai_api\n  prompt: default\n  base_url: http://x\n  model: m\n  timeout: 1\n  api_key:\n    env: K\n",
+        )
+        .unwrap();
         let env = FakeEnvironment {
             cwd: repo,
             ..FakeEnvironment::new().with_stdin_is_terminal(true)
@@ -1397,17 +1456,17 @@ mod tests {
         let mut stdin = std::io::Cursor::new(b"n\n".to_vec());
         let mut out = Vec::new();
         let mut stderr = Vec::new();
-        let err =
-            run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
-        assert_eq!(err.exit_code().as_u8(), 8);
+        let _ = run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf);
         let printed = String::from_utf8(stderr).unwrap();
         assert!(printed.contains("Restrict the diff to specific files?"));
+        assert!(printed.contains("Generating diff using: jj --no-pager diff '--color=never'\n"));
     }
 
     #[test]
     fn jj_file_picker_answered_yes_reaches_fzf_and_cancelling_it_is_exit_14() {
         let (_tmp, repo) = jj_repo();
         std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
+        std::fs::write(repo.join("b.rs"), "world\n").unwrap();
         let config_dir = repo.parent().unwrap().join("config");
         write_two_entry_config(&config_dir);
         let env = FakeEnvironment {

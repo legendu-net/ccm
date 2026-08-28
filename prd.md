@@ -316,8 +316,10 @@ identical either way.
 Default mode can add a fifth stdin prompt — the interactive file picker (see
 "Interactive file selection" above) — right after tool selection and before diff
 generation: for a jj repository, whenever neither `--include` nor `--exclude` was
-already given. It shares the tool picker's two front-ends and the same
-interactive-terminal/EOF/abort-cancels-with-exit-14 behavior; the only difference is
+already given and the working copy has two or more changed files (fewer than that and
+`ccm` skips the prompt outright, whether or not stdin is a real terminal). It shares
+the tool picker's two front-ends and the same interactive-terminal/EOF/abort-cancels-
+with-exit-14 behavior; the only difference is
 that it's a two-step prompt (a yes/no question, then — only if answered yes — the
 file picker itself), so an EOF'd or aborted stdin cancels at whichever of the two steps
 it's currently on.
@@ -503,18 +505,26 @@ accepted (see the usage-error note above).
 #### Interactive file selection
 
 In default mode (not `--dry-run`), for a jj repository, when neither `--include` nor
-`--exclude` was given, `ccm` asks a fifth interactive prompt (see "Interactive terminal
-requirement" below) before diff generation runs: `Restrict the diff to specific files?`
-`[Space/Enter/N]o    [Y]es: `. A bare Enter (or `n`/`N`) — the default — proceeds exactly
-as if this prompt didn't exist: the whole working copy, same as answering the flag-based
-question by omission. This is jj-only for the same reason `--include`/`--exclude` are:
-git handling has no per-file diff/commit scoping mechanism to restrict.
+`--exclude` was given, `ccm` enumerates the working copy the same way resolving
+`--include`/`--exclude` does (`jj diff --summary`, see above — the same progress lines
+apply) *before* deciding whether to prompt at all. With at most one changed file, there
+is nothing meaningfully different between "the whole working copy" and "a chosen
+subset" — so `ccm` skips straight to the whole working copy, exactly as if this feature
+didn't exist, no prompt shown. (Zero changed files still surfaces as the usual "nothing
+to diff" exit code 8 once diff generation itself runs.) This is jj-only for the same
+reason `--include`/`--exclude` are: git handling has no per-file diff/commit scoping
+mechanism to restrict.
 
-Answering yes enumerates the working copy the same way resolving `--include`/`--exclude`
-does (`jj diff --summary`, see above — the same progress lines apply), then offers a
-picker over the enumerated files: `fzf` when it's on `$PATH`, stdin is a real usable
-terminal, and `CCM_FUZZY` isn't `0` (see Selection and "Preferences of Dependencies" item
-8), or a numbered stdin prompt otherwise. Each candidate is shown as `<status>  <path>`
+With two or more changed files, `ccm` asks a fifth interactive prompt (see "Interactive
+terminal requirement" below) before diff generation runs: `Restrict the diff to
+specific files?` `[Space/Enter/N]o    [Y]es: `. A bare Enter (or `n`/`N`) — the default
+— proceeds with the whole working copy, same as answering the flag-based question by
+omission.
+
+Answering yes offers a picker over the enumerated files: `fzf` when it's on `$PATH`,
+stdin is a real usable terminal, and `CCM_FUZZY` isn't `0` (see Selection and
+"Preferences of Dependencies" item 8), or a numbered stdin prompt otherwise. Each
+candidate is shown as `<status>  <path>`
 (the same status character and target path `jj diff --summary` parsing already produces,
 never the raw `<old> => <new>` brace form — see the rename/copy handling above). The
 `fzf` front-end additionally previews the highlighted file's own diff in a side pane
@@ -523,10 +533,9 @@ front-ends allow marking any number of candidates before confirming — `fzf` vi
 `--multi` (Tab to mark), the numbered fallback via a comma- or whitespace-separated list
 of indices, with a blank line meaning every candidate.
 
-If the enumerated working copy is empty (nothing changed), `ccm` fails immediately with
-exit code 8 (see Error Handling) rather than showing an empty picker. If every enumerated
-file ends up marked, that resolves to the whole working copy — identical to answering
-`No` — rather than to a "restricted" scope that happens to be everything; this keeps the
+If every enumerated file ends up marked, that resolves to the whole working copy —
+identical to answering `No` — rather than to a "restricted" scope that happens to be
+everything; this keeps the
 degenerate "select everything" case from making the jj commit-command picker below
 believe a real restriction was made (which would otherwise offer `jj split` instead of
 `jj describe` — see "jj commit commands" — over the entire working copy for no reason).
@@ -1224,19 +1233,22 @@ later stages are never reached:
    with no probing of any kind, so a failure here — an `api.yaml` with every entry
    disabled under `--dry-run`, an unmatched non-empty `--tool` name, or a cancelled
    tool-picker prompt — fails fast without first paying for a potentially large diff.
-6. **Diff generation** — for a jj repository in default mode with neither `--include`
-   nor `--exclude` given, first the interactive file picker (see "Interactive file
-   selection"): a yes/no prompt, then — only if answered yes — enumeration (as below)
-   and a picker over the results, either of which cancelling is exit code 14. For jj
-   with `--include`/`--exclude`, or a "yes" answer to the file picker, first running the
-   `jj diff --summary` enumeration call (exit code 7 if this subprocess itself fails, see
-   "Diff scope resolution"); then resolving `--include`/`--exclude` (or the picker's
-   marked subset) against the enumerated paths, where an unmatched path is a usage error
-   (exit code 2, jj only — not applicable to the picker, which only ever offers already-
-   enumerated paths) or an empty result is exit code 8 (nothing changed to restrict,
-   or every marked file collapsing to the whole working copy still requires that
-   working copy to be non-empty); then running the final `git diff`/`jj diff` invocation
-   (exit code 7 as well) and confirming the result is non-empty (exit code 8).
+6. **Diff generation** — for jj with `--include`/`--exclude`, or in default mode for a
+   jj repository with neither given (the interactive file picker, see "Interactive file
+   selection"), first running the `jj diff --summary` enumeration call (exit code 7 if
+   this subprocess itself fails, see "Diff scope resolution"). For the interactive file
+   picker specifically, the enumerated count then decides whether it prompts at all: at
+   most one changed file skips straight to the next step with no prompt; two or more
+   shows the yes/no prompt, then — only if answered yes — a picker over the enumerated
+   files, either of which cancelling is exit code 14. Then resolving
+   `--include`/`--exclude` (or the file picker's marked subset) against the enumerated
+   paths, where an unmatched path is a usage error (exit code 2, jj only — not
+   applicable to the picker, which only ever offers already-enumerated paths) or an
+   empty result is exit code 8 (nothing changed to restrict — not applicable to the
+   picker either, since selecting nothing isn't offered as a distinct outcome from
+   declining, or from marking every candidate — see "Interactive file selection"); then
+   running the final `git diff`/`jj diff` invocation (exit code 7 as well) and
+   confirming the result is non-empty (exit code 8).
 7. **Generation** — API key resolution (exit code 9), the tool/API call itself (exit
    code 10), response parsing (exit code 11), and the response-cleanup pass (see
    "Response cleanup") — the last of which cannot itself fail, only change what a later

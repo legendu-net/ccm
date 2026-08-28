@@ -15,6 +15,7 @@ pub mod diff;
 pub mod editor;
 pub mod env;
 pub mod error;
+pub mod fileselect;
 pub mod fzf;
 pub mod generation;
 pub mod picker;

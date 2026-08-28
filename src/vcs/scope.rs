@@ -29,6 +29,10 @@ pub enum Selection {
     Include(Vec<NormalizedPath>),
     /// `--exclude <patterns>`: every file except those matched by at least one pattern.
     Exclude(Vec<NormalizedPath>),
+    /// Files already resolved by the interactive file picker (prd.md "Diff scope
+    /// resolution") — no enumeration or pattern matching left to do; `resolve_scope`
+    /// just deduplicates and returns them as-is.
+    Explicit(Vec<String>),
 }
 
 impl Selection {
@@ -71,6 +75,7 @@ pub fn resolve_scope(
         )),
         Selection::Include(patterns) => resolve_include(entries, patterns),
         Selection::Exclude(patterns) => resolve_exclude(entries, patterns),
+        Selection::Explicit(files) => Ok(dedup_preserve_order(files.iter().cloned())),
     }
 }
 
@@ -158,7 +163,9 @@ fn require_all_matched(patterns: &[NormalizedPath], matched: &[bool]) -> Result<
     Ok(())
 }
 
-fn dedup_preserve_order(iter: impl Iterator<Item = String>) -> Vec<String> {
+/// `pub(crate)` (rather than private) so `fileselect.rs` can reuse it for the
+/// interactive file picker's candidate list, instead of duplicating it.
+pub(crate) fn dedup_preserve_order(iter: impl Iterator<Item = String>) -> Vec<String> {
     let mut seen = HashSet::new();
     iter.filter(|item| seen.insert(item.clone())).collect()
 }
@@ -181,6 +188,21 @@ mod tests {
         let e = entries("M a.rs\nA b.rs\nR c/{old.rs => new.rs}\n");
         let result = resolve_scope(&e, &Selection::All).unwrap();
         assert_eq!(result, vec!["a.rs", "b.rs", "c/new.rs"]);
+    }
+
+    #[test]
+    fn explicit_returns_the_given_files_deduplicated_and_in_order() {
+        // The interactive file picker (`fileselect.rs`) already resolves against
+        // real enumerated entries before building this variant, so `resolve_scope`
+        // itself ignores `entries` for it — pass an unrelated one to pin that.
+        let e = entries("M unrelated.rs\n");
+        let sel = Selection::Explicit(vec![
+            "b.rs".to_string(),
+            "a.rs".to_string(),
+            "b.rs".to_string(),
+        ]);
+        let result = resolve_scope(&e, &sel).unwrap();
+        assert_eq!(result, vec!["b.rs", "a.rs"]);
     }
 
     #[test]

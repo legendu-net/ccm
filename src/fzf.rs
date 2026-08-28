@@ -47,6 +47,23 @@ pub enum FzfOutcome {
     Unavailable(String),
 }
 
+/// How a [`Fzf::select_files`] attempt ended — the multi-select analogue of
+/// [`FzfOutcome`] for the interactive diff-scope picker (prd.md "Diff scope
+/// resolution"). Indices are into the `lines` passed to `select_files`, in the same
+/// (first-seen, deduplicated) order `fileselect.rs` built them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FzfMultiOutcome {
+    /// The user marked and confirmed one or more candidates. Never empty — a
+    /// confirm with nothing marked is indistinguishable from "nothing matched" and is
+    /// [`FzfMultiOutcome::Cancelled`] instead (see [`interpret_multi`]).
+    Selected(Vec<usize>),
+    /// Esc/Ctrl-C (`fzf` exit 130), or Enter with nothing marked and nothing matched
+    /// (`fzf` exit 1, or exit 0 with empty stdout).
+    Cancelled,
+    /// Same set of reasons as [`FzfOutcome::Unavailable`].
+    Unavailable(String),
+}
+
 /// Where `pipeline::run_with`'s stage 5 gets the tool picker's fuzzy front-end from —
 /// abstracted so that gating logic (call `fzf` only when stdin is a terminal, map each
 /// [`FzfOutcome`] to the right control flow, fall back to the numbered prompt on
@@ -56,6 +73,12 @@ pub enum FzfOutcome {
 /// own doc comment and the plan's manual verification steps for that.
 pub trait Fzf {
     fn select(&self, cwd: &Path, lines: &[String]) -> FzfOutcome;
+
+    /// The multi-select front-end for the interactive diff-scope picker
+    /// (`fileselect.rs`, prd.md "Diff scope resolution") — same shelling-out
+    /// mechanism as [`Fzf::select`], but allows marking any number of candidates
+    /// (`--multi`) and previews each highlighted file's diff.
+    fn select_files(&self, cwd: &Path, lines: &[String]) -> FzfMultiOutcome;
 }
 
 /// Whether `$CCM_FUZZY` is set to exactly `0` — the escape hatch (prd.md "Selection")
@@ -73,6 +96,10 @@ pub struct RealFzf;
 impl Fzf for RealFzf {
     fn select(&self, cwd: &Path, lines: &[String]) -> FzfOutcome {
         select(cwd, lines)
+    }
+
+    fn select_files(&self, cwd: &Path, lines: &[String]) -> FzfMultiOutcome {
+        select_files(cwd, lines)
     }
 }
 
@@ -93,6 +120,43 @@ fn build_args() -> Vec<String> {
         "--height=40%".to_string(),
         "--layout=reverse".to_string(),
         "--no-multi".to_string(),
+    ]
+}
+
+/// Runs `fzf` over `lines` (`"<status>  <path>"` rows built from parsed
+/// `jj diff --summary` entries — see `fileselect.rs`) in multi-select mode (`--multi`,
+/// Tab to mark) with a live per-file diff preview, and reports what happened.
+#[must_use]
+pub fn select_files(cwd: &Path, lines: &[String]) -> FzfMultiOutcome {
+    let stdin_bytes = format!("{}\n", lines.join("\n")).into_bytes();
+    interpret_multi(spawn(cwd, &build_files_args(), stdin_bytes), lines)
+}
+
+/// Args for the file picker's `fzf` invocation. `--preview` runs
+/// `jj --no-pager diff --color=always -- {2..}` (`--color=always` rather than the
+/// `--color=never` "Diff generation" uses elsewhere: this output goes straight to
+/// fzf's own preview pane, a real terminal, not somewhere `ccm` parses it). `{2..}` is
+/// fzf's own placeholder for "every field from the 2nd column onward" of the
+/// *highlighted* line (field 1 is the leading status letter — see `fileselect.rs`'s
+/// candidate-line format), substituted
+/// and shell-quoted by fzf itself before it's handed to `$SHELL -c`. This is the one
+/// place `ccm` puts a value into a shell command line rather than a `Command::arg()`
+/// — unavoidable, since `--preview` is fzf's only mechanism for it — but the command
+/// text itself is a fixed literal we control; the only variable part is fzf's own
+/// quoted substitution of the currently-highlighted candidate's already-validated
+/// path (never arbitrary user input).
+fn build_files_args() -> Vec<String> {
+    vec![
+        "--prompt=Select files> ".to_string(),
+        "--multi".to_string(),
+        // Taller than the tool picker's plain `--height=40%` (`build_args`, no
+        // preview to make room for): a diff needs real vertical space to be
+        // legible, not just the list of candidates.
+        "--height=90%".to_string(),
+        "--layout=reverse".to_string(),
+        "--header=Tab to mark, Enter to confirm".to_string(),
+        "--preview=jj --no-pager diff --color=always -- {2..}".to_string(),
+        "--preview-window=right,70%,wrap".to_string(),
     ]
 }
 
@@ -160,6 +224,48 @@ fn interpret(result: Result<Captured, ExecError>, lines: &[String]) -> FzfOutcom
         Some(1 | 130) => FzfOutcome::Cancelled,
         Some(code) => FzfOutcome::Unavailable(format!("fzf exited with status {code}")),
         None => FzfOutcome::Unavailable("fzf was terminated by a signal".to_string()),
+    }
+}
+
+/// The [`interpret`] of [`select_files`]: same exit-code table, but exit 0 carries one
+/// line of output per marked candidate (`--multi`) rather than exactly one. Every
+/// returned line must match a candidate — one that doesn't degrades the whole result
+/// to [`FzfMultiOutcome::Unavailable`], same as [`interpret`]. Exit 0 with no lines at
+/// all (confirming with nothing marked and nothing matched the filter) is
+/// [`FzfMultiOutcome::Cancelled`], not an empty `Selected(vec![])` — there is nothing
+/// useful the caller could do with a scope of zero files that isn't better expressed
+/// as a cancellation.
+fn interpret_multi(result: Result<Captured, ExecError>, lines: &[String]) -> FzfMultiOutcome {
+    let captured = match result {
+        Ok(c) => c,
+        Err(err) => return FzfMultiOutcome::Unavailable(err.to_string()),
+    };
+    match captured.code {
+        Some(0) => {
+            let selected = owned_utf8_lossy(captured.stdout);
+            let selected = selected.trim_end_matches('\n');
+            if selected.is_empty() {
+                return FzfMultiOutcome::Cancelled;
+            }
+            let mut indices = Vec::new();
+            for line in selected.split('\n') {
+                match lines
+                    .iter()
+                    .position(|candidate| candidate.as_str() == line)
+                {
+                    Some(index) => indices.push(index),
+                    None => {
+                        return FzfMultiOutcome::Unavailable(format!(
+                            "fzf returned a line that doesn't match any candidate: {line:?}"
+                        ));
+                    }
+                }
+            }
+            FzfMultiOutcome::Selected(indices)
+        }
+        Some(1 | 130) => FzfMultiOutcome::Cancelled,
+        Some(code) => FzfMultiOutcome::Unavailable(format!("fzf exited with status {code}")),
+        None => FzfMultiOutcome::Unavailable("fzf was terminated by a signal".to_string()),
     }
 }
 
@@ -289,5 +395,119 @@ mod tests {
         // steps for that.
         let outcome = select(&std::env::current_dir().unwrap(), &lines());
         assert!(matches!(outcome, FzfOutcome::Unavailable(_)));
+    }
+
+    // ---- select_files / build_files_args / interpret_multi ----
+
+    fn file_lines() -> Vec<String> {
+        vec![
+            "M  src/diff.rs".to_string(),
+            "A  src/fileselect.rs".to_string(),
+            "D  src/old.rs".to_string(),
+        ]
+    }
+
+    #[test]
+    fn build_files_args_requests_multi_select_and_a_diff_preview() {
+        let args = build_files_args();
+        assert!(args.contains(&"--multi".to_string()));
+        assert!(args.contains(&"--preview=jj --no-pager diff --color=always -- {2..}".to_string()));
+    }
+
+    #[test]
+    fn multi_exit_0_with_one_matching_line_selects_its_index() {
+        let result = captured(0, "A  src/fileselect.rs\n");
+        assert_eq!(
+            interpret_multi(result, &file_lines()),
+            FzfMultiOutcome::Selected(vec![1])
+        );
+    }
+
+    #[test]
+    fn multi_exit_0_with_several_lines_selects_every_index_in_candidate_order() {
+        let result = captured(0, "D  src/old.rs\nM  src/diff.rs\n");
+        assert_eq!(
+            interpret_multi(result, &file_lines()),
+            FzfMultiOutcome::Selected(vec![2, 0])
+        );
+    }
+
+    #[test]
+    fn multi_exit_0_with_empty_stdout_is_cancelled() {
+        // Confirming with nothing marked and nothing matched the filter — distinct
+        // from `Selected(vec![])`, which callers would otherwise have to special-case.
+        let result = captured(0, "");
+        assert_eq!(
+            interpret_multi(result, &file_lines()),
+            FzfMultiOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn multi_exit_0_with_an_unmatched_line_is_unavailable() {
+        let result = captured(0, "M  src/diff.rs\nnot a real candidate\n");
+        assert!(matches!(
+            interpret_multi(result, &file_lines()),
+            FzfMultiOutcome::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn multi_exit_1_no_match_is_cancelled() {
+        let result = captured(1, "");
+        assert_eq!(
+            interpret_multi(result, &file_lines()),
+            FzfMultiOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn multi_exit_130_ctrl_c_or_esc_is_cancelled() {
+        let result = captured(130, "");
+        assert_eq!(
+            interpret_multi(result, &file_lines()),
+            FzfMultiOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn multi_unrecognized_exit_code_is_unavailable() {
+        let result = captured(2, "");
+        assert!(matches!(
+            interpret_multi(result, &file_lines()),
+            FzfMultiOutcome::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn multi_killed_by_a_signal_is_unavailable() {
+        let result = Ok(Captured {
+            success: false,
+            code: None,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        });
+        assert!(matches!(
+            interpret_multi(result, &file_lines()),
+            FzfMultiOutcome::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn multi_spawn_failure_is_unavailable() {
+        let result: Result<Captured, ExecError> = Err(ExecError::Spawn(std::io::Error::other(
+            "no such file or directory",
+        )));
+        assert!(matches!(
+            interpret_multi(result, &file_lines()),
+            FzfMultiOutcome::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn select_files_against_the_real_subprocess_degrades_safely_with_no_terminal() {
+        // Same rationale as `select_against_the_real_subprocess_degrades_safely_with_no_terminal`.
+        let outcome = select_files(&std::env::current_dir().unwrap(), &file_lines());
+        assert!(matches!(outcome, FzfMultiOutcome::Unavailable(_)));
     }
 }

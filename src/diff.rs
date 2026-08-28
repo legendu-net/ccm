@@ -82,6 +82,10 @@ fn generate_jj(
             scope::resolve_scope(&entries, selection)
                 .map_err(|err| UsageError::UnmatchedPath { entry: err.entry })?
         }
+        // Already resolved by the interactive file picker (`fileselect.rs`) — no
+        // enumeration needed here; `resolve_scope` just dedups.
+        scope::Selection::Explicit(_) => scope::resolve_scope(&[], selection)
+            .map_err(|err| UsageError::UnmatchedPath { entry: err.entry })?,
     };
 
     // A requested scope (--include/--exclude) that resolves to nothing (e.g.
@@ -122,7 +126,10 @@ fn generate_jj(
     })
 }
 
-fn enumerate_jj(
+/// `pub(crate)` (rather than private) so `fileselect.rs` can reuse the same
+/// enumeration call — progress lines included — to build the interactive file
+/// picker's candidate list, instead of duplicating it.
+pub(crate) fn enumerate_jj(
     cwd: &Path,
     stderr: &mut dyn std::io::Write,
 ) -> Result<Vec<summary::SummaryEntry>, CcmError> {
@@ -266,6 +273,26 @@ mod tests {
         let result = generate(&handling, &Selection::All, &repo, &mut stderr).unwrap();
         assert!(result.diff.contains("a.txt"));
         assert!(result.files.is_empty());
+    }
+
+    #[test]
+    fn jj_explicit_scope_skips_enumeration_and_diffs_only_those_files() {
+        // `Selection::Explicit` — what the interactive file picker (`fileselect.rs`)
+        // resolves to for a proper subset — must reach the same scoped `jj diff`
+        // invocation `Include` does, but without an enumeration call of its own (the
+        // picker already enumerated to build its candidate list).
+        let (_tmp, repo) = jj_repo();
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "world\n").unwrap();
+        let handling = RepoHandling::Jj { root: repo.clone() };
+        let sel = Selection::Explicit(vec!["a.txt".to_string()]);
+        let mut stderr = Vec::new();
+        let result = generate(&handling, &sel, &repo, &mut stderr).unwrap();
+        assert_eq!(result.files, vec!["a.txt".to_string()]);
+        assert!(result.diff.contains("a.txt"));
+        assert!(!result.diff.contains("b.txt"));
+        let logged = String::from_utf8(stderr).unwrap();
+        assert!(!logged.contains("Enumerating working-copy files using:"));
     }
 
     #[test]

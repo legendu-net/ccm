@@ -203,6 +203,126 @@ pub fn prompt_index(
     }
 }
 
+/// Interprets one byte of the "restrict the diff to specific files?" yes/no prompt
+/// (prd.md "Diff scope resolution"): `y`/`Y` is yes; `n`/`N`, a space, or Enter
+/// (`\n`/`\r`) is no — the prompt's default, since a bare Enter must reproduce
+/// today's whole-working-copy behavior unchanged. Any other byte is a retry (`None`).
+///
+/// Ctrl-D (`0x04`) is deliberately not classified here, same as [`interpret_action`]
+/// and [`interpret_commit_key`]: `read_key` cancels the prompt outright for it, this
+/// pure classifier never sees it.
+#[must_use]
+pub fn interpret_yes_no(byte: u8) -> Option<bool> {
+    match byte {
+        b'y' | b'Y' => Some(true),
+        b'n' | b'N' | b' ' | b'\n' | b'\r' => Some(false),
+        _ => None,
+    }
+}
+
+fn print_yes_no_menu(writer: &mut (impl Write + ?Sized)) {
+    let _ = writeln!(writer, "Restrict the diff to specific files?");
+    let _ = write!(writer, "[Space/Enter/N]o    [Y]es: ");
+    let _ = writer.flush();
+}
+
+/// Runs the "restrict the diff to specific files?" prompt (prd.md "Diff scope
+/// resolution") to a yes/no answer, the same single-keypress shape as
+/// [`prompt_action`]/[`prompt_commit`] (see `read_key` for raw-vs-line-mode and
+/// EOF/Ctrl-D handling): prints `Restrict the diff to specific files?` followed by
+/// `[Space/Enter/N]o    [Y]es: `, reads one key, and repeats on anything
+/// [`interpret_yes_no`] doesn't recognize.
+///
+/// # Errors
+/// [`PickerError::Cancelled`] on EOF or Ctrl-D before a valid answer;
+/// [`PickerError::Io`] if reading a byte fails for a reason other than EOF.
+pub fn prompt_yes_no(
+    reader: &mut (impl BufRead + ?Sized),
+    writer: &mut (impl Write + ?Sized),
+    raw: bool,
+) -> Result<bool, PickerError> {
+    loop {
+        print_yes_no_menu(writer);
+        let byte = read_key(reader, raw)?;
+        if let Some(answer) = interpret_yes_no(byte) {
+            let _ = writeln!(writer);
+            return Ok(answer);
+        }
+    }
+}
+
+/// Interprets one line of the numbered multi-index file picker (the `fzf`-unavailable
+/// fallback for "Diff scope resolution"'s interactive picker): a blank (or
+/// all-whitespace) line means "every candidate" — `0..count`, matching a bare Enter's
+/// meaning everywhere else in this module; otherwise every token, split on
+/// whitespace and/or commas, must parse as a `usize` strictly less than `count` or the
+/// whole line is a retry (`None`) — one bad token invalidates the entire attempt,
+/// same principle as [`interpret_index`] rejecting an out-of-range single index.
+/// Valid input dedups and returns indices in candidate order (`lines`' order), not
+/// input order.
+#[must_use]
+pub fn interpret_indices(line: &str, count: usize) -> Option<Vec<usize>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Some((0..count).collect());
+    }
+    let mut seen = vec![false; count];
+    for token in trimmed.split([',', ' ', '\t']).filter(|t| !t.is_empty()) {
+        match token.parse::<usize>() {
+            Ok(index) if index < count => seen[index] = true,
+            _ => return None,
+        }
+    }
+    let indices: Vec<usize> = (0..count).filter(|&i| seen[i]).collect();
+    if indices.is_empty() {
+        // Every token was whitespace/comma noise with nothing between (shouldn't
+        // happen given the `trimmed.is_empty()` check above, but guards against a
+        // line like "," yielding an empty scope rather than a retry).
+        return None;
+    }
+    Some(indices)
+}
+
+fn print_indices_menu(writer: &mut (impl Write + ?Sized), lines: &[String]) {
+    for (index, line) in lines.iter().enumerate() {
+        let _ = writeln!(writer, "{index}) {line}");
+    }
+    let _ = write!(
+        writer,
+        "Enter indices (space/comma separated, blank = all): "
+    );
+    let _ = writer.flush();
+}
+
+/// The `fzf`-unavailable fallback for the interactive file picker (prd.md "Diff scope
+/// resolution"): prints each of `lines` as `N) <line>`, then
+/// `Enter indices (space/comma separated, blank = all): ` with no trailing newline
+/// (flushed so it's visible before `reader` blocks), and reprints the whole menu on
+/// any input [`interpret_indices`] doesn't accept. `lines` must be non-empty.
+///
+/// # Errors
+/// [`PickerError::Cancelled`] on EOF without ever selecting a valid set of indices;
+/// [`PickerError::Io`] if reading a line fails for a reason other than EOF.
+pub fn prompt_indices(
+    reader: &mut (impl BufRead + ?Sized),
+    writer: &mut (impl Write + ?Sized),
+    lines: &[String],
+) -> Result<Vec<usize>, PickerError> {
+    loop {
+        print_indices_menu(writer, lines);
+
+        let mut line = String::new();
+        let bytes_read = reader.read_line(&mut line).map_err(PickerError::Io)?;
+        if bytes_read == 0 {
+            return Err(PickerError::Cancelled);
+        }
+
+        if let Some(indices) = interpret_indices(&line, lines.len()) {
+            return Ok(indices);
+        }
+    }
+}
+
 /// One action selected from the message review prompt (prd.md "Message review
 /// prompt"): [`ReviewAction::Regenerate`] re-runs stage 7 (generation) against the
 /// already-selected entry and already-computed diff; [`ReviewAction::Edit`] opens
@@ -681,6 +801,168 @@ mod tests {
         let mut input = Cursor::new(vec![0xFF, 0xFE, b'\n']);
         let mut output = Vec::new();
         let result = prompt_index(&mut input, &mut output, &lines, None);
+        assert!(matches!(result, Err(PickerError::Io(_))));
+    }
+
+    // ---- interpret_yes_no / prompt_yes_no (the "restrict the diff" prompt) ----
+
+    #[test]
+    fn interpret_yes_no_y_is_yes_case_insensitive() {
+        assert_eq!(interpret_yes_no(b'y'), Some(true));
+        assert_eq!(interpret_yes_no(b'Y'), Some(true));
+    }
+
+    #[test]
+    fn interpret_yes_no_n_space_enter_are_all_no() {
+        for &byte in b"nN \n\r" {
+            assert_eq!(interpret_yes_no(byte), Some(false));
+        }
+    }
+
+    #[test]
+    fn interpret_yes_no_rejects_anything_else() {
+        assert_eq!(interpret_yes_no(b'x'), None);
+        assert_eq!(interpret_yes_no(0x04), None);
+    }
+
+    #[test]
+    fn prompt_yes_no_blank_line_defaults_to_no() {
+        let mut input = Cursor::new(b"\n".to_vec());
+        let mut output = Vec::new();
+        let answer = prompt_yes_no(&mut input, &mut output, false).unwrap();
+        assert!(!answer);
+    }
+
+    #[test]
+    fn prompt_yes_no_y_selects_yes() {
+        let mut input = Cursor::new(b"y\n".to_vec());
+        let mut output = Vec::new();
+        let answer = prompt_yes_no(&mut input, &mut output, false).unwrap();
+        assert!(answer);
+    }
+
+    #[test]
+    fn prompt_yes_no_menu_wording() {
+        let mut input = Cursor::new(b"\n".to_vec());
+        let mut output = Vec::new();
+        prompt_yes_no(&mut input, &mut output, false).unwrap();
+        let printed = String::from_utf8(output).unwrap();
+        assert!(printed.contains("Restrict the diff to specific files?"));
+        assert!(printed.contains("[Space/Enter/N]o    [Y]es: "));
+    }
+
+    #[test]
+    fn prompt_yes_no_reprints_menu_and_retries_on_invalid_input() {
+        let mut input = Cursor::new(b"x\ny\n".to_vec());
+        let mut output = Vec::new();
+        let answer = prompt_yes_no(&mut input, &mut output, false).unwrap();
+        assert!(answer);
+        let printed = String::from_utf8(output).unwrap();
+        assert_eq!(printed.matches("[Space/Enter/N]o").count(), 2);
+    }
+
+    #[test]
+    fn prompt_yes_no_cancels_on_eof() {
+        let mut input = Cursor::new(Vec::new());
+        let mut output = Vec::new();
+        let result = prompt_yes_no(&mut input, &mut output, false);
+        assert!(matches!(result, Err(PickerError::Cancelled)));
+    }
+
+    #[test]
+    fn prompt_yes_no_ctrl_d_byte_cancels() {
+        let mut input = Cursor::new(vec![0x04]);
+        let mut output = Vec::new();
+        let result = prompt_yes_no(&mut input, &mut output, false);
+        assert!(matches!(result, Err(PickerError::Cancelled)));
+    }
+
+    // ---- interpret_indices / prompt_indices (the fzf-unavailable file-picker
+    // fallback) ----
+
+    #[test]
+    fn interpret_indices_blank_line_selects_every_index() {
+        assert_eq!(interpret_indices("", 3), Some(vec![0, 1, 2]));
+        assert_eq!(interpret_indices("   \n", 3), Some(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn interpret_indices_accepts_space_separated_tokens() {
+        assert_eq!(interpret_indices("0 2", 3), Some(vec![0, 2]));
+    }
+
+    #[test]
+    fn interpret_indices_accepts_comma_separated_tokens() {
+        assert_eq!(interpret_indices("0,2", 3), Some(vec![0, 2]));
+    }
+
+    #[test]
+    fn interpret_indices_accepts_mixed_separators_and_dedups() {
+        assert_eq!(interpret_indices(" 2, 0 2,0 \n", 3), Some(vec![0, 2]));
+    }
+
+    #[test]
+    fn interpret_indices_returns_candidate_order_not_input_order() {
+        assert_eq!(interpret_indices("2 0", 3), Some(vec![0, 2]));
+    }
+
+    #[test]
+    fn interpret_indices_rejects_out_of_range_or_garbage() {
+        assert_eq!(interpret_indices("3", 3), None);
+        assert_eq!(interpret_indices("-1", 3), None);
+        assert_eq!(interpret_indices("nope", 3), None);
+        assert_eq!(interpret_indices("0 nope", 3), None);
+    }
+
+    #[test]
+    fn prompt_indices_blank_line_selects_all() {
+        let lines = vec!["a".to_string(), "b".to_string()];
+        let mut input = Cursor::new(b"\n".to_vec());
+        let mut output = Vec::new();
+        let picked = prompt_indices(&mut input, &mut output, &lines).unwrap();
+        assert_eq!(picked, vec![0, 1]);
+    }
+
+    #[test]
+    fn prompt_indices_selects_a_valid_subset() {
+        let lines = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut input = Cursor::new(b"0,2\n".to_vec());
+        let mut output = Vec::new();
+        let picked = prompt_indices(&mut input, &mut output, &lines).unwrap();
+        assert_eq!(picked, vec![0, 2]);
+        let printed = String::from_utf8(output).unwrap();
+        assert_eq!(
+            printed,
+            "0) a\n1) b\n2) c\nEnter indices (space/comma separated, blank = all): "
+        );
+    }
+
+    #[test]
+    fn prompt_indices_reprints_menu_and_retries_on_invalid_input() {
+        let lines = vec!["a".to_string(), "b".to_string()];
+        let mut input = Cursor::new(b"5\nnope\n1\n".to_vec());
+        let mut output = Vec::new();
+        let picked = prompt_indices(&mut input, &mut output, &lines).unwrap();
+        assert_eq!(picked, vec![1]);
+        let printed = String::from_utf8(output).unwrap();
+        assert_eq!(printed.matches("0) a").count(), 3);
+    }
+
+    #[test]
+    fn prompt_indices_cancels_on_eof() {
+        let lines = vec!["a".to_string()];
+        let mut input = Cursor::new(Vec::new());
+        let mut output = Vec::new();
+        let result = prompt_indices(&mut input, &mut output, &lines);
+        assert!(matches!(result, Err(PickerError::Cancelled)));
+    }
+
+    #[test]
+    fn prompt_indices_io_error_is_not_cancelled() {
+        let lines = vec!["a".to_string()];
+        let mut input = Cursor::new(vec![0xFF, 0xFE, b'\n']);
+        let mut output = Vec::new();
+        let result = prompt_indices(&mut input, &mut output, &lines);
         assert!(matches!(result, Err(PickerError::Io(_))));
     }
 

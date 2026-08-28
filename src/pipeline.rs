@@ -9,9 +9,12 @@
 //! (repo-dependent argument validation), stage 4 (config load & validation), stage 5
 //! (tool/API selection — an explicit `--tool <NAME>`, or the first enabled entry, or, in
 //! default mode with an ambiguous choice, a tool-picker prompt), stage 6 (diff
-//! generation), stage 7 (message generation), and stage 8 (`--dry-run`'s immediate blank
-//! check and raw stdout print, or the default mode's full `$EDITOR` flow followed by the
-//! jj commit-command picker and the final commit invocation).
+//! generation — preceded, in default mode for a jj repository with no
+//! `--include`/`--exclude` already given, by the interactive file picker,
+//! `fileselect::resolve_interactively`), stage 7 (message generation), and stage 8
+//! (`--dry-run`'s immediate blank check and raw stdout print, or the default mode's full
+//! `$EDITOR` flow followed by the jj commit-command picker and the final commit
+//! invocation).
 
 use crate::cli::{self, Cli};
 use crate::commit;
@@ -20,6 +23,7 @@ use crate::diff;
 use crate::editor;
 use crate::env::Environment;
 use crate::error::{CcmError, EditorError, UsageError};
+use crate::fileselect;
 use crate::fzf;
 use crate::generation;
 use crate::picker;
@@ -171,8 +175,24 @@ pub fn run_with(
         &loaded.entries[index]
     };
 
-    // Stage 6: diff generation.
-    let selection = Selection::from_cli(&cli.include, &cli.exclude);
+    // Stage 6: diff generation, preceded by the interactive file picker (prd.md "Diff
+    // scope resolution") — a fifth default-mode stdin prompt, jj-only, offered only
+    // when neither `--include` nor `--exclude` already answered this question and
+    // `--dry-run` isn't in play (same "no one to ask, don't block automation"
+    // reasoning as every other prompt — see "Interactive terminal requirement").
+    let mut selection = Selection::from_cli(&cli.include, &cli.exclude);
+    if matches!(handling, RepoHandling::Jj { .. })
+        && !cli.dry_run
+        && matches!(selection, Selection::All)
+        && env.stdin_is_terminal()
+    {
+        let fzf_enabled = !fzf::disabled_by_env(env.var("CCM_FUZZY").as_deref());
+        // `raw` is always true here — the `env.stdin_is_terminal()` guard above is
+        // exactly what `raw` means for every other picker in this pipeline (see the
+        // stage-8 `let raw = env.stdin_is_terminal();` below).
+        selection =
+            fileselect::resolve_interactively(&cwd, stdin, stderr, fzf_picker, fzf_enabled, true)?;
+    }
     let diff_result = diff::generate(&handling, &selection, &cwd, stderr)?;
 
     // Stage 7: message generation.
@@ -754,14 +774,24 @@ mod tests {
         fn select(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfOutcome {
             self.0.clone()
         }
+        // Every test using `FakeFzf` selects a tool over a git repo, which never
+        // reaches the (jj-only) interactive file picker — see `fileselect_gating`
+        // below for the double used there instead.
+        fn select_files(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfMultiOutcome {
+            panic!("select_files should not have been invoked in this test");
+        }
     }
 
-    /// Fails the test if the tool picker ever reaches the fzf front-end at all — used
-    /// to guard the cases where it must not even be attempted (piped stdin, an
-    /// unambiguous automatic selection, `--tool <NAME>` bypassing the picker outright).
+    /// Fails the test if either fzf front-end (tool picker or file picker) ever gets
+    /// reached at all — used to guard the cases where neither must even be attempted
+    /// (piped stdin, an unambiguous automatic selection, `--tool <NAME>` bypassing the
+    /// tool picker outright, git handling bypassing the file picker outright, ...).
     struct PanickingFzf;
     impl fzf::Fzf for PanickingFzf {
         fn select(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfOutcome {
+            panic!("fzf should not have been invoked in this test");
+        }
+        fn select_files(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfMultiOutcome {
             panic!("fzf should not have been invoked in this test");
         }
     }
@@ -774,6 +804,22 @@ mod tests {
         fn select(&self, _cwd: &std::path::Path, lines: &[String]) -> fzf::FzfOutcome {
             *self.received.borrow_mut() = Some(lines.to_vec());
             self.outcome.clone()
+        }
+        fn select_files(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfMultiOutcome {
+            panic!("select_files should not have been invoked in this test");
+        }
+    }
+
+    /// The file-picker analogue of `FakeFzf`: every test using this double drives the
+    /// (jj-only) interactive file picker specifically, so its `select` (tool picker)
+    /// side panics instead.
+    struct FakeFilesFzf(fzf::FzfMultiOutcome);
+    impl fzf::Fzf for FakeFilesFzf {
+        fn select(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfOutcome {
+            panic!("select should not have been invoked in this test");
+        }
+        fn select_files(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfMultiOutcome {
+            self.0.clone()
         }
     }
 
@@ -1185,5 +1231,238 @@ mod tests {
         let err =
             run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
         assert_eq!(err.exit_code().as_u8(), 8);
+    }
+
+    // ---- interactive file picker gating (prd.md "Diff scope resolution") — whether
+    // the "restrict the diff to specific files?" prompt is even reached; its own
+    // behavior (fzf outcomes, the collapse-to-All rule, the numbered fallback) is
+    // covered directly in fileselect.rs's own tests. All of these leave the working
+    // copy untouched (nothing staged/changed), and drive stdin with EOF whenever the
+    // prompt is expected to be reached — deterministic and network-free: reaching the
+    // prompt surfaces as exit 14 (cancelled on EOF, same as any other picker), never
+    // reaching it surfaces as the pre-existing exit 8 (nothing to diff). ----
+
+    fn jj_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let jj_config = tmp.path().join("jj.toml");
+        std::fs::write(
+            &jj_config,
+            "[user]\nname = \"t\"\nemail = \"t@example.com\"\n",
+        )
+        .unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("jj")
+            .args(["git", "init", "--no-colocate"])
+            .current_dir(&repo)
+            .env("JJ_CONFIG", &jj_config)
+            .status()
+            .unwrap();
+        (tmp, repo)
+    }
+
+    #[test]
+    fn jj_default_mode_terminal_reaches_the_file_picker() {
+        let (_tmp, repo) = jj_repo();
+        let config_dir = repo.parent().unwrap().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new()); // EOF: cancels the prompt.
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err =
+            run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 14);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(printed.contains("Restrict the diff to specific files?"));
+    }
+
+    #[test]
+    fn dry_run_never_reaches_the_file_picker() {
+        let (_tmp, repo) = jj_repo();
+        let config_dir = repo.parent().unwrap().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.dry_run = true;
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err =
+            run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(!printed.contains("Restrict the diff to specific files?"));
+    }
+
+    #[test]
+    fn git_handling_never_reaches_the_file_picker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        let config_dir = tmp.path().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err =
+            run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(!printed.contains("Restrict the diff to specific files?"));
+    }
+
+    #[test]
+    fn an_explicit_include_never_reaches_the_file_picker() {
+        let (_tmp, repo) = jj_repo();
+        let config_dir = repo.parent().unwrap().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.include = vec![PathBuf::from("a.rs")];
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        // Nothing changed at all, so the unmatched `--include` pattern is a usage
+        // error (exit 2) rather than exit 8 — still well before message generation,
+        // and still proof enough that the file picker (which would cancel with exit
+        // 14 on this same EOF'd stdin) was never reached.
+        let err =
+            run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 2);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(!printed.contains("Restrict the diff to specific files?"));
+    }
+
+    #[test]
+    fn piped_stdin_never_reaches_the_file_picker() {
+        let (_tmp, repo) = jj_repo();
+        let config_dir = repo.parent().unwrap().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new() // stdin_is_terminal defaults to false.
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err =
+            run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(!printed.contains("Restrict the diff to specific files?"));
+    }
+
+    #[test]
+    fn jj_file_picker_answered_no_proceeds_to_diff_generation_unrestricted() {
+        // Declining the prompt must behave exactly as if it had never been shown —
+        // same exit 8 "nothing staged" every other unrestricted-scope test hits.
+        let (_tmp, repo) = jj_repo();
+        let config_dir = repo.parent().unwrap().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(b"n\n".to_vec());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err =
+            run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 8);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(printed.contains("Restrict the diff to specific files?"));
+    }
+
+    #[test]
+    fn jj_file_picker_answered_yes_reaches_fzf_and_cancelling_it_is_exit_14() {
+        let (_tmp, repo) = jj_repo();
+        std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
+        let config_dir = repo.parent().unwrap().join("config");
+        write_two_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(b"y\n".to_vec());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let fzf_picker = FakeFilesFzf(fzf::FzfMultiOutcome::Cancelled);
+        let err = run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &fzf_picker).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 14);
+    }
+
+    #[test]
+    fn jj_file_picker_subset_selection_scopes_the_diff_generation_call() {
+        // A successful subset selection must reach `diff::generate` with exactly the
+        // marked file, not enumeration or a git-style unscoped diff — proven here by
+        // the exact `Generating diff using:` progress line, which stage 6 only emits
+        // once diff generation actually runs. A 1s call timeout on the (unreachable)
+        // `http://x` backend keeps this test fast and network-independent regardless
+        // of how message generation, which necessarily runs next, resolves.
+        let (_tmp, repo) = jj_repo();
+        std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
+        std::fs::write(repo.join("b.rs"), "world\n").unwrap();
+        let config_dir = repo.parent().unwrap().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("prompts.yaml"),
+            "default:\n  template: write it\n",
+        )
+        .unwrap();
+        std::fs::write(
+            config_dir.join("api.yaml"),
+            "- name: a\n  type: openai_api\n  prompt: default\n  base_url: http://x\n  model: m\n  timeout: 1\n  api_key:\n    env: K\n",
+        )
+        .unwrap();
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        let mut stdin = std::io::Cursor::new(b"y\n".to_vec());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        // Candidate order is first-seen from `jj diff --summary`, alphabetical here:
+        // index 0 is a.rs.
+        let fzf_picker = FakeFilesFzf(fzf::FzfMultiOutcome::Selected(vec![0]));
+        let _ = run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &fzf_picker);
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(printed.contains("Diff scope restricted to 1 file(s): a.rs"));
+        assert!(printed.contains("Generating diff using: jj --no-pager diff '--color=never' a.rs"));
+        assert!(!printed.contains("b.rs\n"));
     }
 }

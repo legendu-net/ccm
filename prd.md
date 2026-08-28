@@ -313,11 +313,22 @@ usable terminal, and `CCM_FUZZY` isn't `0`; a numbered stdin prompt otherwise �
 interactive-terminal requirement and the EOF/abort-cancels-with-exit-14 behavior are
 identical either way.
 
+Default mode can add a fifth stdin prompt — the interactive file picker (see
+"Interactive file selection" above) — right after tool selection and before diff
+generation: for a jj repository, whenever neither `--include` nor `--exclude` was
+already given. It shares the tool picker's two front-ends and the same
+interactive-terminal/EOF/abort-cancels-with-exit-14 behavior; the only difference is
+that it's a two-step prompt (a yes/no question, then — only if answered yes — the
+file picker itself), so an EOF'd or aborted stdin cancels at whichever of the two steps
+it's currently on.
+
 `--dry-run` otherwise has no interactive-terminal requirement at all: absent `--tool`, it
 never shows the message review prompt, never opens `$EDITOR`, never reads the
-jj-command picker's stdin prompt, and never shows the tool picker either — it always
-takes the first `enabled: true` entry regardless of how many entries are enabled (exit
-code 6 if none are). So it runs correctly with stdin/stdout piped, redirected, or absent
+jj-command picker's stdin prompt, never shows the tool picker, and never shows the
+interactive file picker either — it always takes the first `enabled: true` entry
+regardless of how many entries are enabled (exit code 6 if none are), and always diffs
+the whole working copy unless `--include`/`--exclude` was given explicitly on the
+command line. So it runs correctly with stdin/stdout piped, redirected, or absent
 entirely (see "Default behavior", "jj commit commands", and "Selection"). This split is
 deliberate, matching the two ways `ccm` is meant to be used (see Goal): default mode is
 for direct interactive use of `ccm` from a shell, so it's free to ask when the tool
@@ -488,6 +499,41 @@ instead.
 For a git repository (including a colocated repository run with `--git`), `ccm`
 always diffs/commits the current stage as-is; `--include`/`--exclude` are not
 accepted (see the usage-error note above).
+
+#### Interactive file selection
+
+In default mode (not `--dry-run`), for a jj repository, when neither `--include` nor
+`--exclude` was given, `ccm` asks a fifth interactive prompt (see "Interactive terminal
+requirement" below) before diff generation runs: `Restrict the diff to specific files?`
+`[Space/Enter/N]o    [Y]es: `. A bare Enter (or `n`/`N`) — the default — proceeds exactly
+as if this prompt didn't exist: the whole working copy, same as answering the flag-based
+question by omission. This is jj-only for the same reason `--include`/`--exclude` are:
+git handling has no per-file diff/commit scoping mechanism to restrict.
+
+Answering yes enumerates the working copy the same way resolving `--include`/`--exclude`
+does (`jj diff --summary`, see above — the same progress lines apply), then offers a
+picker over the enumerated files: `fzf` when it's on `$PATH`, stdin is a real usable
+terminal, and `CCM_FUZZY` isn't `0` (see Selection and "Preferences of Dependencies" item
+8), or a numbered stdin prompt otherwise. Each candidate is shown as `<status>  <path>`
+(the same status character and target path `jj diff --summary` parsing already produces,
+never the raw `<old> => <new>` brace form — see the rename/copy handling above). The
+`fzf` front-end additionally previews the highlighted file's own diff in a side pane
+(`jj --no-pager diff --color=always -- <path>`), letting the choice be made by eye. Both
+front-ends allow marking any number of candidates before confirming — `fzf` via
+`--multi` (Tab to mark), the numbered fallback via a comma- or whitespace-separated list
+of indices, with a blank line meaning every candidate.
+
+If the enumerated working copy is empty (nothing changed), `ccm` fails immediately with
+exit code 8 (see Error Handling) rather than showing an empty picker. If every enumerated
+file ends up marked, that resolves to the whole working copy — identical to answering
+`No` — rather than to a "restricted" scope that happens to be everything; this keeps the
+degenerate "select everything" case from making the jj commit-command picker below
+believe a real restriction was made (which would otherwise offer `jj split` instead of
+`jj describe` — see "jj commit commands" — over the entire working copy for no reason).
+Otherwise, the marked subset becomes the file scope exactly as a resolved
+`--include` would: passed as explicit file arguments to the final
+`jj --no-pager diff --color=never <files...>` invocation, and threaded through unchanged
+to the jj commit-command picker afterward.
 
 Default behavior (no `--dry-run`): compute the diff, generate the commit message,
 open it in `$EDITOR` — always, even if generation came back blank — and after the user
@@ -1178,12 +1224,19 @@ later stages are never reached:
    with no probing of any kind, so a failure here — an `api.yaml` with every entry
    disabled under `--dry-run`, an unmatched non-empty `--tool` name, or a cancelled
    tool-picker prompt — fails fast without first paying for a potentially large diff.
-6. **Diff generation** — for jj with `--include`/`--exclude`, first running the `jj diff
-   --summary` enumeration call (exit code 7 if this subprocess itself fails, see "Diff
-   scope resolution"); then resolving `--include`/`--exclude` against the enumerated
-   paths, where an unmatched path is a usage error (exit code 2, jj only); then running
-   the final `git diff`/`jj diff` invocation (exit code 7 as well) and confirming the
-   result is non-empty (exit code 8).
+6. **Diff generation** — for a jj repository in default mode with neither `--include`
+   nor `--exclude` given, first the interactive file picker (see "Interactive file
+   selection"): a yes/no prompt, then — only if answered yes — enumeration (as below)
+   and a picker over the results, either of which cancelling is exit code 14. For jj
+   with `--include`/`--exclude`, or a "yes" answer to the file picker, first running the
+   `jj diff --summary` enumeration call (exit code 7 if this subprocess itself fails, see
+   "Diff scope resolution"); then resolving `--include`/`--exclude` (or the picker's
+   marked subset) against the enumerated paths, where an unmatched path is a usage error
+   (exit code 2, jj only — not applicable to the picker, which only ever offers already-
+   enumerated paths) or an empty result is exit code 8 (nothing changed to restrict,
+   or every marked file collapsing to the whole working copy still requires that
+   working copy to be non-empty); then running the final `git diff`/`jj diff` invocation
+   (exit code 7 as well) and confirming the result is non-empty (exit code 8).
 7. **Generation** — API key resolution (exit code 9), the tool/API call itself (exit
    code 10), response parsing (exit code 11), and the response-cleanup pass (see
    "Response cleanup") — the last of which cannot itself fail, only change what a later
@@ -1234,7 +1287,7 @@ before 15 in the table.
 | 11 | Malformed response — `openai_api` only: the response could not be parsed, or parsed but missing the expected message content. Not applicable to `agent_cli`, whose output is raw stdout text; a bad `agent_cli` result surfaces as exit code 10 (non-zero exit) or exit code 15 (blank result), never 11. |
 | 12 | Editor unavailable — `$EDITOR` is set but doesn't resolve to an executable, or `$EDITOR` is unset and none of `nvim`/`vim`/`vi` are found on `$PATH` |
 | 13 | Editor aborted — `$EDITOR` (or the `nvim`/`vim`/`vi` fallback) exited with a non-zero status. The temp file's content is not read, and nothing is committed, regardless of what was saved before the editor exited. |
-| 14 | Aborted — an interactive picker was cancelled (EOF before a valid selection, or — in the tool picker's `fzf` front-end — an explicit abort): the tool picker at stage 5 — default mode, or any mode when `--tool ''` was given (see "Selection") — or, at stage 8, the message review prompt (see "Message review prompt") or the jj-command picker (see "jj commit commands"). In the stage-8 cases, nothing is committed. |
+| 14 | Aborted — an interactive picker was cancelled (EOF before a valid selection, or — in the `fzf` front-end — an explicit abort): the tool picker at stage 5 — default mode, or any mode when `--tool ''` was given (see "Selection") — the interactive file picker between stage 5 and stage 6, default mode for a jj repository with no `--include`/`--exclude` (see "Interactive file selection") — or, at stage 8, the message review prompt (see "Message review prompt") or the jj-command picker (see "jj commit commands"). In the stage-8 cases, nothing is committed. |
 | 15 | Empty commit message — blank after the applicable check (see "Message pre-population and cleanup"): under `--dry-run`, the tool/API response — after the response-cleanup pass (see "Response cleanup") — is empty or all whitespace, checked immediately; otherwise, the `$EDITOR`-saved file is blank after cleanup, checked after `$EDITOR` closes, since the user may have written one in over a blank generation. |
 | 16 | Commit failed — `git commit` / `jj commit`\|`describe`\|`split` invocation failed |
 | 17 | Temp file creation/write failed — creating the `$EDITOR` temp file (e.g. `tempfile::Builder::new().prefix("CCM_EDITMSG_").tempfile_in(...)` erroring because the OS temp directory is unwritable or the disk is full) or writing the pre-populated content into it failed. Falls between exit codes 12 and 13 in the pipeline (see "Check order" above); listed here, out of numeric sequence, to avoid renumbering 13–16. |
@@ -1305,10 +1358,11 @@ before 15 in the table.
     back to reading a whole line instead, so this dependency is only ever exercised on a
     genuine interactive run.
 
-8. The tool picker (see "Selection") is the one deliberate exception to items 3 and 7's
-    reasoning against a fuzzy-finder/TUI crate: its candidate list is `api.yaml` itself,
-    which has no bounded size, so fuzzy search over tool names is a genuine usability win
-    once many tools are configured — unlike the jj commit-command picker or the message
+8. The tool picker (see "Selection") and the interactive file picker (see "Interactive
+    file selection") are the two deliberate exceptions to items 3 and 7's
+    reasoning against a fuzzy-finder/TUI crate: their candidate lists — `api.yaml`,
+    and the jj working copy's changed files — have no bounded size, so fuzzy search is a
+    genuine usability win once either grows large — unlike the jj commit-command picker or the message
     review prompt, whose choice counts are small and fixed. Rather than embedding a
     fuzzy-finder *library* (rejected in item 3 for the jj picker, and a poor fit here too
     — evaluated and declined: https://crates.io/crates/skim pulls in an unconditional,
@@ -1317,21 +1371,32 @@ before 15 in the table.
     shells out to the `fzf` command-line tool (https://github.com/junegunn/fzf) as an
     optional subprocess, the same way it already shells out to `git`/`jj` themselves
     (item 2) rather than embedding a library for those either. Concretely:
-    - `ccm` writes the same candidate list `--list-tools` prints to `fzf`'s stdin and
-      reads the selected line back from its stdout — the standard `command | fzf`
-      idiom, just invoked directly rather than through a shell pipe. `fzf`'s own
-      interactive rendering and keyboard input go through `/dev/tty` directly,
-      independent of how `ccm` has wired its stdin/stdout/stderr.
-    - It's only attempted when stdin is a real terminal (see "Interactive terminal
+    - For the tool picker: `ccm` writes the same candidate list `--list-tools` prints
+      to `fzf`'s stdin and reads the selected line back from its stdout — the standard
+      `command | fzf` idiom, just invoked directly rather than through a shell pipe.
+      For the file picker: `ccm` writes one `<status>  <path>` line per changed file
+      (`--multi`, so any number can be marked) and additionally sets `--preview=jj
+      --no-pager diff --color=always -- {2..}` so the highlighted file's own diff
+      renders live in a side pane — `{2..}` is `fzf`'s own placeholder for "every field
+      from the highlighted line from the 2nd column onward" (the leading status
+      character is column 1), substituted and shell-quoted by `fzf` itself before
+      being handed to `$SHELL -c`; this is the one place `ccm` puts a value into a
+      shell command line rather than a `Command::arg()`, unavoidable since `--preview`
+      is `fzf`'s only mechanism for it, but the command text is a fixed literal `ccm`
+      controls and the substituted value is always one of the paths `ccm` already
+      validated by enumerating the working copy, never arbitrary input. Either way,
+      `fzf`'s own interactive rendering and keyboard input go through `/dev/tty`
+      directly, independent of how `ccm` has wired its stdin/stdout/stderr.
+    - Both are only attempted when stdin is a real terminal (see "Interactive terminal
       requirement") and `CCM_FUZZY` isn't set to `0` (an escape hatch for a terminal
       that mishandles `fzf`'s inline TUI — see "Selection"); if `fzf` isn't found on
       `$PATH`, doesn't have a controlling terminal available to it, or fails for any
       other reason, `ccm` notes why on stderr and falls back to the numbered stdin
-      prompt the tool picker has always had — behavior is never worse than without
+      prompt each picker has always had — behavior is never worse than without
       `fzf` installed.
     - This adds no new dependency to `Cargo.toml` at all: `ccm` builds and runs
       identically whether or not `fzf` happens to be on the user's machine, exactly
       like its optional `nvim`/`vim`/`vi` `$EDITOR` fallback chain (see "Default
       behavior") already works whether or not any of those happen to be installed.
-    - It's scoped to this one prompt. The jj commit-command picker and the message
+    - It's scoped to these two prompts. The jj commit-command picker and the message
       review prompt are unaffected and stay exactly as items 3 and 7 describe.

@@ -152,6 +152,22 @@ pub fn fzf_unavailable(out: &mut (impl Write + ?Sized), reason: &str) -> io::Res
     )
 }
 
+/// Logged once the interactive file picker (`fileselect.rs`, prd.md "Diff scope
+/// resolution") resolves to a proper subset of the working copy, so the log states
+/// what scope the diff/commit that follows actually covers — the same spirit as
+/// `Working-copy files enumerated by:` above, but naming the *chosen* files rather
+/// than every changed one. Not logged when every candidate was picked (that collapses
+/// to `Selection::All`, same as declining the prompt) or when the prompt was declined
+/// outright.
+pub fn files_selected(out: &mut (impl Write + ?Sized), files: &[String]) -> io::Result<()> {
+    writeln!(
+        out,
+        "Diff scope restricted to {} file(s): {}",
+        files.len(),
+        files.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +285,14 @@ mod tests {
         assert_eq!(
             captured(|w| committed_using(w, "git commit -m ...")),
             "Committed using: git commit -m ...\n"
+        );
+    }
+
+    #[test]
+    fn files_selected_line_matches_expected_wording() {
+        assert_eq!(
+            captured(|w| files_selected(w, &["a.rs".to_string(), "b.rs".to_string()])),
+            "Diff scope restricted to 2 file(s): a.rs, b.rs\n"
         );
     }
 }

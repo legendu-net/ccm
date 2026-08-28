@@ -180,8 +180,8 @@ fn blank_message_never_reaches_the_jj_picker() {
         .assert()
         .code(15)
         .stderr(
-            predicate::str::contains("0) jj commit")
+            predicate::str::contains("[Space/Enter/C]ommit")
                 .not()
-                .and(predicate::str::contains("1) jj describe").not()),
+                .and(predicate::str::contains("[D]escribe").not()),
         );
 }

@@ -293,10 +293,11 @@ Passing `--list-tools` together with any flag other than `--config` is also a us
 Default mode (no `--dry-run`) requires a real interactive terminal: the message review
 prompt (see "Message review prompt"), the jj-command picker (a stdin prompt, see "jj
 commit commands"), and `$EDITOR` itself all need genuine interactive stdio to do their
-jobs — a picker reading a line (or, for the review prompt, a single keypress on a real
-terminal) from stdin, an editor attaching to a controlling terminal to actually let the
-user edit. `ccm` runs no explicit upfront check for this; instead, the requirement
-surfaces naturally through existing failure modes when it isn't met — e.g. stdin
+jobs — a picker reading from stdin (a line, or — for the review prompt and the
+jj-command picker — a single keypress on a real terminal), an editor attaching to a
+controlling terminal to actually let the user edit. `ccm` runs no explicit upfront check
+for this; instead, the requirement surfaces naturally through existing failure modes when
+it isn't met — e.g. stdin
 already at EOF (piped from `/dev/null`, or a script with nothing left to send) trips the
 review prompt's or the jj-command picker's EOF-cancels-the-prompt behavior (exit code
 14, see "Message review prompt" and "jj commit commands"), and an editor that can't
@@ -657,16 +658,18 @@ or, when generation came back blank (nothing worth accepting yet):
     instead of accept — preserving the "always give the user a chance to write their own"
     guarantee (Requirement 7) a blank generation has always had.
 
-On a real terminal, the prompt reads a single keypress — no Enter needed for `r`/`e`;
+On a real terminal, the prompt reads a single keypress — no Enter needed for `r`/`e`/`a`;
 Space or Enter accepts (or edits, per the blank-message rule above) immediately. When
 stdin isn't a real terminal (piped, redirected, or any non-interactive caller), the
-prompt instead reads a whole line and inspects only its first character, the same
-line-oriented style as every other picker in this document — so a scripted caller
-driving `ccm` still works by writing `"r\n"`/`"e\n"`/`"\n"` one line at a time. Any other
-input reprints the prompt and re-reads, the same reprint-and-retry behavior every other
-picker in this document uses. EOF (stdin closed before a valid selection) cancels the
-whole run — exit code 14, the same "an interactive picker was cancelled" code the tool
-picker and the jj commit-command picker use (see "Selection", "jj commit commands").
+prompt instead reads a whole line and inspects only its first character, the
+line-oriented style every other picker falls back to off a terminal — so a scripted
+caller driving `ccm` still works by writing `"r\n"`/`"e\n"`/`"\n"` one line at a time.
+The jj commit-command picker (see "jj commit commands") shares this exact keypress /
+line-mode design. Any other input reprints the prompt and re-reads, the same
+reprint-and-retry behavior every other picker in this document uses. EOF (stdin closed
+before a valid selection) cancels the whole run — exit code 14, the same "an interactive
+picker was cancelled" code the tool picker and the jj commit-command picker use (see
+"Selection", "jj commit commands").
 
 This prompt never appears under `--dry-run` (see "Interactive terminal requirement"
 above): `--dry-run` prints stage 7's cleaned response to stdout immediately and never
@@ -838,24 +841,41 @@ copy. In short, exactly one of `jj describe`/`jj split` is available at a time �
 both, and never neither: `--include`/`--exclude` given → `jj commit` + `jj split`;
 neither given → `jj commit` + `jj describe`.
 
-Since there are never more than two choices on offer, the picker is a plain numbered
-prompt rather than a fuzzy-finder UI: `ccm` prints the two choices to stderr as `0) jj
-commit` and `1) jj describe` (or `1) jj split`, whichever applies), then reads a line
-from stdin. The line is trimmed of leading/trailing whitespace before being checked —
-so e.g. a trailing `\r` from a CRLF terminal, or an accidental leading/trailing space,
-doesn't turn a valid `0`/`1` into an invalid entry — and if the trimmed result is exactly
-`0` or `1` that selects the corresponding command.
+Since there are never more than two choices on offer, the picker is a plain
+single-keypress prompt rather than a fuzzy-finder UI, styled exactly like the message
+review prompt above. `ccm` prints one of the following to stderr:
 
-`jj commit` (index 0) is always the picker's default, marked as such in the printed menu
-— `0) jj commit  (default)` — since it's the one choice that's always on offer regardless
-of scope (see the argument-template table above). A blank line (the user just pressing
-Enter, with no index typed) selects it directly, without needing to type `0`. Any other
-invalid input (anything that isn't exactly `0`, `1`, or blank — e.g. `2`, `y`) still
-reprints the two choices and re-prompts. True EOF (Ctrl-D) on stdin is a separate signal
-from a blank line and is unaffected by the default: it still cancels the picker outright
-regardless of whether a default is available. If the user cancels — EOF without having
-entered a valid index — `ccm` aborts immediately — a blank *line* would have selected the
-default, but EOF is not a blank line — and does not commit — and exits with code 14.
+```
+[Space/Enter/C]ommit  [D]escribe:
+```
+
+or, when `--include`/`--exclude` was given (so `jj split` replaces `jj describe`):
+
+```
+[Space/Enter/C]ommit  [S]plit:
+```
+
+- `c`/`C` selects `jj commit`.
+- `d`/`D` selects `jj describe`, and `s`/`S` selects `jj split` — each only when that
+    command is the one actually on offer (the other key is then just an unrecognized
+    keystroke that re-prompts).
+- **`jj commit` is always the default** — it's the one choice available regardless of
+    scope (see the argument-template table above) — so a space, Enter, or blank line
+    selects it without typing `c`, which is what `[Space/Enter/C]ommit` denotes.
+- Any other input (anything that isn't `c`/`d`/`s`, a space, or Enter — including the
+    bare `0`/`1` the old numbered picker accepted) reprints the menu and re-prompts.
+
+On a real terminal the prompt reads a single keypress — no Enter needed. When stdin
+isn't a real terminal (piped, redirected, or any non-interactive caller) it instead
+reads a whole line and inspects only its first character, the same line-oriented style
+the other pickers use — so a scripted caller drives it by writing `"c\n"`/`"d\n"`/
+`"s\n"`/`"\n"` one line at a time. This is the same raw-vs-line-mode split the message
+review prompt uses (see "Message review prompt").
+
+True EOF (Ctrl-D) on stdin is a separate signal from a blank line and is unaffected by
+the default: it still cancels the picker outright. If the user cancels — EOF without a
+valid selection — `ccm` aborts immediately — a blank *line* would have selected the
+default, but EOF is not a blank line — does not commit, and exits with code 14.
 
 ## Configuration
 
@@ -1221,12 +1241,13 @@ before 15 in the table.
 3. The jj commit-command picker (see "jj commit commands") never offers more than two
     choices at a time — `jj commit` plus either `jj describe` or `jj split`, never both
     and never neither — so it doesn't warrant a fuzzy-finder crate like
-    https://crates.io/crates/skim. It's implemented as a plain numbered stdin prompt
-    (see "jj commit commands") using only the standard library. This reasoning is
-    specific to prompts with a small, fixed choice count: the jj commit-command picker
-    here (never more than two) and the message review prompt (item 7, three actions). It
-    deliberately does *not* extend to the tool picker (see "Selection"), whose candidate
-    list is `api.yaml` itself and is therefore open-ended — see item 8.
+    https://crates.io/crates/skim. It's implemented as a plain single-keypress stdin
+    prompt (see "jj commit commands"), like the message review prompt, using only the
+    standard library. This reasoning is specific to prompts with a small, fixed choice
+    count: the jj commit-command picker here (never more than two) and the message review
+    prompt (item 7, three actions). It deliberately does *not* extend to the tool picker
+    (see "Selection"), whose candidate list is `api.yaml` itself and is therefore
+    open-ended — see item 8.
 
 4. Use the `clap` crate (https://crates.io/crates/clap), with the `derive` feature, for
     parsing `ccm`'s own command-line arguments (see CLI Interface).
@@ -1255,16 +1276,17 @@ before 15 in the table.
     through that same path like any other file, with no further involvement from
     `tempfile`.
 
-7. The message review prompt (see "Message review prompt") reads a single keypress on a
-    real terminal, which needs raw terminal mode (clearing `ICANON`/`ECHO` for the
-    duration of that one read). Rather than a terminal-UI crate like
+7. The message review prompt and the jj commit-command picker (see "Message review
+    prompt", "jj commit commands") each read a single keypress on a real terminal, which
+    needs raw terminal mode (clearing `ICANON`/`ECHO` for the duration of that one read)
+    — both go through the same helper. Rather than a terminal-UI crate like
     https://crates.io/crates/crossterm or https://crates.io/crates/console, `ccm` uses
     the `term` feature of `nix` (https://crates.io/crates/nix, already a dependency —
-    see item 3's reasoning, which applies equally to this prompt's fixed three-way
-    choice; the open-ended tool picker is the one deliberate exception, item 8) to call
+    see item 3's reasoning, which applies equally to these prompts' small fixed choice
+    counts; the open-ended tool picker is the one deliberate exception, item 8) to call
     `tcgetattr`/`tcsetattr` directly. When stdin isn't a real terminal, the prompt falls
-    back to reading a whole line instead (see "Message review prompt"), so this
-    dependency is only ever exercised on a genuine interactive run.
+    back to reading a whole line instead, so this dependency is only ever exercised on a
+    genuine interactive run.
 
 8. The tool picker (see "Selection") is the one deliberate exception to items 3 and 7's
     reasoning against a fuzzy-finder/TUI crate: its candidate list is `api.yaml` itself,

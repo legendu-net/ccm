@@ -34,6 +34,17 @@ No Enter is needed for `r`/`e`/`a` on a real terminal; when stdin isn't a termin
 scripted), the same keys work a line at a time instead. If generation came back blank,
 there's nothing to accept, so only regenerate/edit are offered, with edit as the default.
 
+In a **jj** repository, accepting the message then opens a second single-keypress prompt
+to choose how to record it:
+
+```
+[Space/Enter/C]ommit  [D]escribe:
+```
+
+`c` / `C`, Space, or Enter runs `jj commit`; `d` / `D` runs `jj describe`. With
+`--include`/`--exclude`, `[S]plit` (`jj split`) replaces `[D]escribe`. Same
+keypress-on-a-terminal / line-at-a-time-when-piped behavior as the review prompt.
+
 ## Configuration
 
 Config directory: `$XDG_CONFIG_HOME/ccm/` if set to a non-empty value, otherwise

@@ -96,12 +96,11 @@ fn jj_unscoped_picker_offers_commit_and_describe_and_commits_via_describe() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
-        .write_stdin("\n1\n") // review prompt: accept; then "1) jj describe"
+        .write_stdin("\nd\n") // review prompt: accept; then "d" -> jj describe
         .assert()
         .code(0)
         .stderr(
-            predicate::str::contains("0) jj commit")
-                .and(predicate::str::contains("1) jj describe"))
+            predicate::str::contains("[Space/Enter/C]ommit  [D]escribe: ")
                 .and(predicate::str::contains("Committing using: jj describe"))
                 .and(predicate::str::contains("Committed using:")),
         );
@@ -131,12 +130,12 @@ fn jj_scoped_picker_offers_commit_and_split_not_describe() {
         .env("EDITOR", "ed")
         .args(["--include", "a.txt", "--config"])
         .arg(fx.config_dir())
-        .write_stdin("\n0\n") // review prompt: accept; then "0) jj commit"
+        .write_stdin("\nc\n") // review prompt: accept; then "c" -> jj commit
         .assert()
         .code(0)
         .stderr(
-            predicate::str::contains("1) jj split")
-                .and(predicate::str::contains("1) jj describe").not())
+            predicate::str::contains("[Space/Enter/C]ommit  [S]plit: ")
+                .and(predicate::str::contains("[D]escribe").not())
                 .and(predicate::str::contains("Committing using: jj commit")),
         );
 }
@@ -173,10 +172,10 @@ fn jj_picker_cancelled_on_eof_is_exit_14_and_nothing_is_committed() {
 
 #[test]
 fn jj_picker_reprompts_on_invalid_input_before_succeeding() {
-    // "garbage" and "2" (out of range) are both genuinely invalid and must retry; a
-    // blank line is deliberately excluded here since it now selects the default
+    // "garbage" and "2" (neither a recognized key) are both genuinely invalid and must
+    // retry; a blank line is deliberately excluded here since it now selects the default
     // (covered separately by jj_picker_blank_input_selects_commit_as_the_default) —
-    // asserting the final command is `jj describe` (from the trailing "1") confirms the
+    // asserting the final command is `jj describe` (from the trailing "d") confirms the
     // picker actually reached and used that input rather than short-circuiting earlier.
     let fx = Fixture::new();
     fx.init_jj();
@@ -187,7 +186,7 @@ fn jj_picker_reprompts_on_invalid_input_before_succeeding() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
-        .write_stdin("\ngarbage\n2\n1\n") // review prompt: accept; then the jj picker
+        .write_stdin("\ngarbage\n2\nd\n") // review prompt: accept; then the jj picker
         .assert()
         .code(0)
         .stderr(predicate::str::contains("Committing using: jj describe"));
@@ -205,12 +204,12 @@ fn jj_picker_blank_input_selects_commit_as_the_default() {
         .args(["--config"])
         .arg(fx.config_dir())
         // review prompt: accept (its own default); then the jj picker's own blank
-        // line, selecting its default in turn.
+        // line, selecting its default (jj commit) in turn.
         .write_stdin("\n\n")
         .assert()
         .code(0)
         .stderr(
-            predicate::str::contains("0) jj commit  (default)")
+            predicate::str::contains("[Space/Enter/C]ommit  [D]escribe: ")
                 .and(predicate::str::contains("Committing using: jj commit")),
         );
 }
@@ -236,5 +235,5 @@ fn blank_message_never_shows_the_picker() {
         .write_stdin("e\n")
         .assert()
         .code(15)
-        .stderr(predicate::str::contains("0) jj commit").not());
+        .stderr(predicate::str::contains("[Space/Enter/C]ommit").not());
 }

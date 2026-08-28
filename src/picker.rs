@@ -1,9 +1,10 @@
 //! Plain stdin pickers (prd.md, "jj commit commands"; "Selection"; "Message review
-//! prompt"): the jj commit-command picker (never more than two choices), default
-//! mode's tool picker (an arbitrary number of `api.yaml` entries, shown only when the
-//! choice is ambiguous), and the message review prompt (regenerate/edit/accept, shown
-//! after every generation) — all plain stdin prompts, so no fuzzy-finder or TUI crate
-//! is warranted (see "Preferences of Dependencies" #3).
+//! prompt"): the jj commit-command picker (never more than two choices, a
+//! single-keypress prompt like the review prompt), default mode's tool picker (an
+//! arbitrary number of `api.yaml` entries, shown only when the choice is ambiguous), and
+//! the message review prompt (regenerate/edit/accept, shown after every generation) —
+//! all plain stdin prompts, so no fuzzy-finder or TUI crate is warranted (see
+//! "Preferences of Dependencies" #3).
 
 use crate::error::{CcmError, PickerCancelled};
 use crate::term;
@@ -23,14 +24,6 @@ pub fn choices(scoped: bool) -> [JjCommitCommand; 2] {
     }
 }
 
-fn label(cmd: JjCommitCommand) -> &'static str {
-    match cmd {
-        JjCommitCommand::Commit => "jj commit",
-        JjCommitCommand::Describe => "jj describe",
-        JjCommitCommand::Split => "jj split",
-    }
-}
-
 /// One line of picker input, already interpreted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerInput {
@@ -38,75 +31,82 @@ pub enum PickerInput {
     Retry,
 }
 
-/// Interprets one line of picker input: trimmed of leading/trailing whitespace (so a
-/// trailing `\r` from a CRLF terminal, or a stray leading/trailing space, doesn't turn
-/// a valid selection into an invalid one), then exactly `"0"` or `"1"` selects that
-/// index; anything else — including a blank or all-whitespace line — is a retry.
-#[must_use]
-pub fn interpret(line: &str) -> PickerInput {
-    match line.trim() {
-        "0" => PickerInput::Chosen(0),
-        "1" => PickerInput::Chosen(1),
-        _ => PickerInput::Retry,
-    }
-}
-
-/// Why [`prompt`] didn't return a selection.
+/// Why a picker didn't return a selection.
 #[derive(Debug, thiserror::Error)]
 pub enum PickerError {
-    /// True EOF (Ctrl-D) without ever selecting a valid index — prd.md's "the user
+    /// True EOF (or Ctrl-D) without ever making a valid selection — prd.md's "the user
     /// canceled the jj-command picker" (exit 14).
     #[error("aborted: no jj command selected")]
     Cancelled,
-    /// A genuine I/O error reading a line (e.g. invalid UTF-8 on stdin) — distinct
+    /// A genuine I/O error reading input (e.g. invalid UTF-8 on stdin) — distinct
     /// from EOF and not itself a "the user cancelled" signal, so callers should not
     /// report it the same way.
     #[error("failed to read picker input: {0}")]
     Io(#[source] std::io::Error),
 }
 
-/// Runs the picker to a selection: prints the two `choices` to `writer` as `0) jj
-/// commit` / `1) jj describe|split` (marking whichever index `default` names with a
-/// trailing `  (default)`), reads a line from `reader`, and repeats on any invalid
-/// (non-`"0"`/`"1"`) input — except a blank or all-whitespace line, which selects
-/// `choices[default]` immediately when `default` is `Some`. True EOF is unaffected by
-/// `default`: it's checked first and always cancels, even with a default set, since it
-/// signals a closed/non-interactive stdin rather than the user pressing Enter.
+/// Interprets one byte of jj commit-command picker input (prd.md "jj commit commands"):
+/// `c`/`C`, a space, or Enter (`\n`/`\r`) selects `jj commit` — index 0, the one choice
+/// always on offer and so the picker's default; `d`/`D` selects `jj describe` and `s`/`S`
+/// selects `jj split`, but each only when that command is the one `choices` actually
+/// offers at index 1 (exactly one of describe/split is ever available — see [`choices`]).
+/// Any other byte is a retry (`None`).
+///
+/// Ctrl-D (`0x04`) is deliberately not classified here, same as [`interpret_action`]: it
+/// cancels the prompt outright, which is `read_key`'s job, not this classifier's.
+#[must_use]
+pub fn interpret_commit_key(byte: u8, choices: &[JjCommitCommand; 2]) -> Option<JjCommitCommand> {
+    match byte {
+        b'c' | b'C' | b' ' | b'\n' | b'\r' => Some(JjCommitCommand::Commit),
+        b'd' | b'D' if choices[1] == JjCommitCommand::Describe => Some(JjCommitCommand::Describe),
+        b's' | b'S' if choices[1] == JjCommitCommand::Split => Some(JjCommitCommand::Split),
+        _ => None,
+    }
+}
+
+/// The `[K]ey`-style menu label for one jj subcommand, keyed on its first letter — the
+/// same letter [`interpret_commit_key`] accepts for it.
+fn key_label(cmd: JjCommitCommand) -> &'static str {
+    match cmd {
+        JjCommitCommand::Commit => "[C]ommit",
+        JjCommitCommand::Describe => "[D]escribe",
+        JjCommitCommand::Split => "[S]plit",
+    }
+}
+
+fn print_commit_menu(writer: &mut (impl Write + ?Sized), choices: &[JjCommitCommand; 2]) {
+    // `choices[0]` is always `jj commit` (see `choices`), and a space/Enter selects it,
+    // hence the fixed `[Space/Enter/C]ommit` prefix; `choices[1]` is the describe-or-split
+    // alternative.
+    let _ = write!(writer, "[Space/Enter/C]ommit  {}: ", key_label(choices[1]));
+    let _ = writer.flush();
+}
+
+/// Runs the jj commit-command picker (prd.md "jj commit commands") to a selection:
+/// prints `[Space/Enter/C]ommit  [D]escribe: ` (or `[S]plit`, whichever [`choices`]
+/// offers at index 1), reads a single key, and repeats on any input
+/// [`interpret_commit_key`] doesn't recognize. `jj commit` is always on offer and is the
+/// default — a space or Enter selects it — so there is no separate `(default)` marker.
+///
+/// Raw-vs-line-mode handling and EOF/Ctrl-D cancellation are exactly [`prompt_action`]'s:
+/// both read through `read_key`, so `raw` means the same single-keypress-on-a-real-
+/// terminal behavior here (see `read_key` and the caller in `commit.rs`).
 ///
 /// # Errors
-/// [`PickerError::Cancelled`] on EOF without ever selecting a valid index;
-/// [`PickerError::Io`] if reading a line fails for a reason other than EOF.
-pub fn prompt(
+/// [`PickerError::Cancelled`] on EOF or Ctrl-D before a valid selection;
+/// [`PickerError::Io`] if reading a byte fails for a reason other than EOF.
+pub fn prompt_commit(
     reader: &mut (impl BufRead + ?Sized),
     writer: &mut (impl Write + ?Sized),
     choices: &[JjCommitCommand; 2],
-    default: Option<usize>,
+    raw: bool,
 ) -> Result<JjCommitCommand, PickerError> {
     loop {
-        for (index, choice) in choices.iter().enumerate() {
-            let suffix = if default == Some(index) {
-                "  (default)"
-            } else {
-                ""
-            };
-            let _ = writeln!(writer, "{index}) {}{suffix}", label(*choice));
-        }
-
-        let mut line = String::new();
-        let bytes_read = reader.read_line(&mut line).map_err(PickerError::Io)?;
-        if bytes_read == 0 {
-            return Err(PickerError::Cancelled);
-        }
-
-        match interpret(&line) {
-            PickerInput::Chosen(index) => return Ok(choices[index]),
-            PickerInput::Retry => {
-                if let Some(d) = default
-                    && line.trim().is_empty()
-                {
-                    return Ok(choices[d]);
-                }
-            }
+        print_commit_menu(writer, choices);
+        let byte = read_key(reader, raw)?;
+        if let Some(cmd) = interpret_commit_key(byte, choices) {
+            let _ = writeln!(writer);
+            return Ok(cmd);
         }
     }
 }
@@ -136,15 +136,15 @@ pub fn interpret_index(line: &str, count: usize) -> PickerInput {
     }
 }
 
-/// Default mode's tool picker: an arbitrary-length numbered-menu variant of
-/// [`prompt`]. Prints each of `lines` as `N) <line>` (the `(default)` marker, if any, is
-/// already baked into the relevant line by `config::listing::lines` — this function adds
-/// no marker of its own), then a `Select a tool [0-N]: ` prompt with no trailing newline
-/// (flushed so it's visible before `reader` blocks), and reprints the whole menu on any
-/// invalid input — except a blank or all-whitespace line, which selects `default`
-/// immediately when it's `Some`. Same EOF-is-[`PickerError::Cancelled`] (unaffected by
-/// `default`, same reasoning as [`prompt`]) / IO-error-is-[`PickerError::Io`] split as
-/// [`prompt`]. `lines` must be non-empty.
+/// Default mode's tool picker: an arbitrary-length numbered menu. Prints each of `lines`
+/// as `N) <line>` (the `(default)` marker, if any, is already baked into the relevant
+/// line by `config::listing::lines` — this function adds no marker of its own), then a
+/// `Select a tool [0-N]: ` prompt with no trailing newline (flushed so it's visible
+/// before `reader` blocks), and reprints the whole menu on any invalid input — except a
+/// blank or all-whitespace line, which selects `default` immediately when it's `Some`.
+/// True EOF is [`PickerError::Cancelled`] (unaffected by `default`: it signals a closed/
+/// non-interactive stdin rather than the user pressing Enter), a non-EOF read failure is
+/// [`PickerError::Io`]. `lines` must be non-empty.
 ///
 /// # Errors
 /// [`PickerError::Cancelled`] on EOF without ever selecting a valid index;
@@ -205,7 +205,7 @@ pub enum ReviewAction {
 ///
 /// Ctrl-D (`0x04`) is deliberately not classified here: unlike every other
 /// unrecognized byte, it doesn't mean "keep asking, try again" — it cancels the prompt
-/// outright, which is [`prompt_action`]'s job, not this pure classifier's.
+/// outright, which is `read_key`'s job, not this pure classifier's.
 #[must_use]
 pub fn interpret_action(byte: u8, allow_accept: bool) -> Option<ReviewAction> {
     match byte {
@@ -232,10 +232,10 @@ fn print_action_menu(writer: &mut (impl Write + ?Sized), allow_accept: bool) {
 
 /// Reads and discards the remainder of the current line (up to and including the
 /// terminating `\n`, or EOF), one byte at a time. Only used in line mode (`raw ==
-/// false` in [`prompt_action`]): since a non-terminal stdin delivers a whole typed line
+/// false` in [`read_key`]): since a non-terminal stdin delivers a whole typed line
 /// at once regardless of which single byte we act on, this keeps every attempt —
 /// whether it selected a valid action or was a retry — consuming exactly one line, the
-/// same granularity [`prompt`]/[`prompt_index`] read at via `read_line`. Without this,
+/// same granularity [`prompt_index`] reads at via `read_line`. Without this,
 /// a leftover `\n` (or trailing garbage) would be mistaken for the next prompt's own
 /// input, be it another attempt at this same prompt or the jj commit-command picker.
 fn drain_rest_of_line(
@@ -259,30 +259,65 @@ fn drain_rest_of_line(
     }
 }
 
+/// Reads one key for a single-keypress prompt — [`prompt_action`] and [`prompt_commit`]
+/// share this.
+///
+/// When `raw` is `true`, process stdin is put into raw terminal mode
+/// ([`term::RawGuard`]) for the read, so a single keypress is returned with no Enter
+/// needed — callers pass `true` only when `Environment::stdin_is_terminal` reports a real
+/// terminal, and `reader` is that same terminal's stdin then. When raw mode isn't
+/// actually engaged for the read — either `raw` is `false` (stdin isn't a real terminal —
+/// every integration test, and any piped caller), or `raw` is `true` but
+/// [`term::RawGuard::enable`] itself fails despite stdin reporting as a terminal — only
+/// the first byte of the line is inspected, and [`drain_rest_of_line`] discards the
+/// remainder — up to and including the terminating `\n`, or EOF — so the next read of
+/// `reader` (a retry of the same prompt, or the next prompt — e.g. the jj commit-command
+/// picker right after the review prompt) always starts at a clean line boundary; skipping
+/// this drain is only correct when raw mode genuinely suppressed canonical line
+/// buffering.
+///
+/// # Errors
+/// [`PickerError::Cancelled`] on EOF (zero bytes read) or a literal Ctrl-D byte
+/// (`0x04`), regardless of `raw` — the same "the user didn't finish choosing" signal
+/// every picker treats as a cancel; [`PickerError::Io`] if the read fails for a reason
+/// other than EOF.
+fn read_key(reader: &mut (impl BufRead + ?Sized), raw: bool) -> Result<u8, PickerError> {
+    let mut buf = [0u8; 1];
+    // Whether raw mode was actually engaged, not merely requested: if `raw` is true but
+    // `RawGuard::enable` itself fails (e.g. `tcgetattr`/`tcsetattr` erroring despite stdin
+    // reporting as a terminal), the terminal stays in canonical line-buffered mode, and
+    // skipping the drain below on `raw` alone would leave a trailing `\n` (or more)
+    // unconsumed, leaking into the next read.
+    let (bytes_read, raw_engaged) = {
+        let guard = raw
+            .then(|| term::RawGuard::enable(std::io::stdin()))
+            .flatten();
+        let raw_engaged = guard.is_some();
+        (reader.read(&mut buf).map_err(PickerError::Io)?, raw_engaged)
+    };
+    if bytes_read == 0 {
+        return Err(PickerError::Cancelled);
+    }
+    let byte = buf[0];
+
+    if !raw_engaged {
+        drain_rest_of_line(reader, byte)?;
+    }
+
+    if byte == 0x04 {
+        return Err(PickerError::Cancelled);
+    }
+
+    Ok(byte)
+}
+
 /// Runs the message review prompt (prd.md "Message review prompt") to a selection:
 /// prints `[R]egenerate  [E]dit  [Space/Enter/A]ccept: ` (or, when `allow_accept` is
 /// `false` — the generated message is blank — `[R]egenerate  [Space/Enter] edit: `),
-/// reads a single byte, and repeats on any input [`interpret_action`] doesn't
-/// recognize.
-///
-/// When `raw` is `true`, stdin is put into raw terminal mode ([`term::RawGuard`]) for
-/// the read, so a single keypress selects an action with no Enter needed — the caller
-/// (`pipeline::run`) only passes `true` when `Environment::stdin_is_terminal` reports a
-/// real terminal, and `reader` is that same terminal's stdin in that case. When raw
-/// mode isn't actually engaged for the read — either `raw` is `false` (stdin isn't a
-/// real terminal — every integration test, and any piped caller), or `raw` is `true`
-/// but [`term::RawGuard::enable`] itself fails despite stdin reporting as a terminal —
-/// only the first byte of each line is inspected, and [`drain_rest_of_line`] discards
-/// the remainder — up to and including the terminating `\n`, or EOF — on every attempt,
-/// valid or not, so the next read of `reader` (a retry of this same prompt, or the jj
-/// commit-command picker) always starts at a clean line boundary; skipping this drain
-/// is only correct when raw mode genuinely suppressed canonical line buffering. A
-/// newline is written after a valid selection either way, since raw mode echoes
-/// nothing back to the terminal on its own.
-///
-/// EOF (zero bytes read) or a literal Ctrl-D byte (`0x04`) cancels immediately,
-/// regardless of `raw` — the same "the user didn't finish choosing" signal the other
-/// pickers treat as [`PickerError::Cancelled`].
+/// reads a single key via `read_key`, and repeats on any input [`interpret_action`]
+/// doesn't recognize. See `read_key` for the raw-vs-line-mode and EOF/Ctrl-D behavior.
+/// A newline is written after a valid selection, since raw mode echoes nothing back to
+/// the terminal on its own.
 ///
 /// # Errors
 /// [`PickerError::Cancelled`] on EOF or Ctrl-D before a valid selection;
@@ -295,33 +330,7 @@ pub fn prompt_action(
 ) -> Result<ReviewAction, PickerError> {
     loop {
         print_action_menu(writer, allow_accept);
-
-        let mut buf = [0u8; 1];
-        // Whether raw mode was actually engaged, not merely requested: if `raw` is
-        // true but `RawGuard::enable` itself fails (e.g. `tcgetattr`/`tcsetattr` erroring
-        // despite stdin reporting as a terminal), the terminal stays in canonical
-        // line-buffered mode, and skipping the drain below on `raw` alone would leave a
-        // trailing `\n` (or more) unconsumed, leaking into the next read.
-        let (bytes_read, raw_engaged) = {
-            let guard = raw
-                .then(|| term::RawGuard::enable(std::io::stdin()))
-                .flatten();
-            let raw_engaged = guard.is_some();
-            (reader.read(&mut buf).map_err(PickerError::Io)?, raw_engaged)
-        };
-        if bytes_read == 0 {
-            return Err(PickerError::Cancelled);
-        }
-        let byte = buf[0];
-
-        if !raw_engaged {
-            drain_rest_of_line(reader, byte)?;
-        }
-
-        if byte == 0x04 {
-            return Err(PickerError::Cancelled);
-        }
-
+        let byte = read_key(reader, raw)?;
         if let Some(action) = interpret_action(byte, allow_accept) {
             let _ = writeln!(writer);
             return Ok(action);
@@ -351,126 +360,169 @@ mod tests {
     }
 
     #[test]
-    fn interpret_exact_zero_and_one() {
-        assert_eq!(interpret("0"), PickerInput::Chosen(0));
-        assert_eq!(interpret("1"), PickerInput::Chosen(1));
+    fn interpret_commit_key_c_space_enter_all_select_commit() {
+        let unscoped = choices(false);
+        for &byte in b"cC \n\r" {
+            assert_eq!(
+                interpret_commit_key(byte, &unscoped),
+                Some(JjCommitCommand::Commit)
+            );
+        }
     }
 
     #[test]
-    fn interpret_trims_whitespace_and_crlf() {
-        assert_eq!(interpret(" 1 \r\n"), PickerInput::Chosen(1));
-        assert_eq!(interpret("\t0\t"), PickerInput::Chosen(0));
+    fn interpret_commit_key_d_selects_describe_only_when_offered() {
+        assert_eq!(
+            interpret_commit_key(b'd', &choices(false)),
+            Some(JjCommitCommand::Describe)
+        );
+        assert_eq!(
+            interpret_commit_key(b'D', &choices(false)),
+            Some(JjCommitCommand::Describe)
+        );
+        // A scoped run offers split, not describe — `d` is then just a retry.
+        assert_eq!(interpret_commit_key(b'd', &choices(true)), None);
     }
 
     #[test]
-    fn interpret_anything_else_is_a_retry() {
-        assert_eq!(interpret(""), PickerInput::Retry);
-        assert_eq!(interpret("   "), PickerInput::Retry);
-        assert_eq!(interpret("2"), PickerInput::Retry);
-        assert_eq!(interpret("y"), PickerInput::Retry);
+    fn interpret_commit_key_s_selects_split_only_when_offered() {
+        assert_eq!(
+            interpret_commit_key(b's', &choices(true)),
+            Some(JjCommitCommand::Split)
+        );
+        assert_eq!(
+            interpret_commit_key(b'S', &choices(true)),
+            Some(JjCommitCommand::Split)
+        );
+        // An unscoped run offers describe, not split — `s` is then just a retry.
+        assert_eq!(interpret_commit_key(b's', &choices(false)), None);
     }
 
     #[test]
-    fn prompt_selects_a_valid_first_answer() {
-        let mut input = Cursor::new(b"0\n".to_vec());
+    fn interpret_commit_key_rejects_anything_else() {
+        // The old numeric `0`/`1` input is no longer accepted.
+        assert_eq!(interpret_commit_key(b'0', &choices(false)), None);
+        assert_eq!(interpret_commit_key(b'1', &choices(false)), None);
+        assert_eq!(interpret_commit_key(b'x', &choices(false)), None);
+        assert_eq!(interpret_commit_key(0x04, &choices(false)), None);
+    }
+
+    #[test]
+    fn prompt_commit_selects_commit_on_c() {
+        let mut input = Cursor::new(b"c\n".to_vec());
         let mut output = Vec::new();
-        let picked = prompt(&mut input, &mut output, &choices(false), None).unwrap();
+        let picked = prompt_commit(&mut input, &mut output, &choices(false), false).unwrap();
         assert_eq!(picked, JjCommitCommand::Commit);
-        let printed = String::from_utf8(output).unwrap();
-        assert_eq!(printed, "0) jj commit\n1) jj describe\n");
     }
 
     #[test]
-    fn prompt_selects_index_one() {
-        let mut input = Cursor::new(b"1\n".to_vec());
-        let mut output = Vec::new();
-        let picked = prompt(&mut input, &mut output, &choices(true), None).unwrap();
-        assert_eq!(picked, JjCommitCommand::Split);
-    }
-
-    #[test]
-    fn prompt_reprints_choices_and_retries_on_invalid_input() {
-        // With no default set, a blank line is just as invalid as "x" — both retry.
-        let mut input = Cursor::new(b"x\n\n0\n".to_vec());
-        let mut output = Vec::new();
-        let picked = prompt(&mut input, &mut output, &choices(false), None).unwrap();
-        assert_eq!(picked, JjCommitCommand::Commit);
-        let printed = String::from_utf8(output).unwrap();
-        // Printed once per attempt: invalid "x", blank, then the winning "0" — three
-        // reprints of the two-line menu.
-        assert_eq!(printed.matches("0) jj commit").count(), 3);
-    }
-
-    #[test]
-    fn prompt_blank_input_selects_the_given_default() {
+    fn prompt_commit_blank_line_selects_commit_as_the_default() {
         let mut input = Cursor::new(b"\n".to_vec());
         let mut output = Vec::new();
-        let picked = prompt(&mut input, &mut output, &choices(true), Some(1)).unwrap();
+        let picked = prompt_commit(&mut input, &mut output, &choices(true), false).unwrap();
+        assert_eq!(picked, JjCommitCommand::Commit);
+    }
+
+    #[test]
+    fn prompt_commit_space_selects_commit() {
+        let mut input = Cursor::new(b" \n".to_vec());
+        let mut output = Vec::new();
+        let picked = prompt_commit(&mut input, &mut output, &choices(false), false).unwrap();
+        assert_eq!(picked, JjCommitCommand::Commit);
+    }
+
+    #[test]
+    fn prompt_commit_eof_cancels_rather_than_selecting_the_default() {
+        // A blank *line* selects the default (jj commit), but EOF — stdin closed with
+        // nothing typed — is a distinct signal and must still cancel with exit 14, never
+        // fall back to the default (prd.md "jj commit commands").
+        let mut input = Cursor::new(Vec::new());
+        let mut output = Vec::new();
+        let result = prompt_commit(&mut input, &mut output, &choices(false), false);
+        assert!(matches!(result, Err(PickerError::Cancelled)));
+    }
+
+    #[test]
+    fn prompt_commit_selects_describe_when_unscoped() {
+        let mut input = Cursor::new(b"d\n".to_vec());
+        let mut output = Vec::new();
+        let picked = prompt_commit(&mut input, &mut output, &choices(false), false).unwrap();
+        assert_eq!(picked, JjCommitCommand::Describe);
+    }
+
+    #[test]
+    fn prompt_commit_selects_split_when_scoped() {
+        let mut input = Cursor::new(b"s\n".to_vec());
+        let mut output = Vec::new();
+        let picked = prompt_commit(&mut input, &mut output, &choices(true), false).unwrap();
         assert_eq!(picked, JjCommitCommand::Split);
     }
 
     #[test]
-    fn prompt_blank_input_without_a_default_still_retries() {
-        let mut input = Cursor::new(b"\n0\n".to_vec());
+    fn prompt_commit_menu_wording_unscoped_offers_describe() {
+        let mut input = Cursor::new(b"c\n".to_vec());
         let mut output = Vec::new();
-        let picked = prompt(&mut input, &mut output, &choices(false), None).unwrap();
+        prompt_commit(&mut input, &mut output, &choices(false), false).unwrap();
+        let printed = String::from_utf8(output).unwrap();
+        assert!(printed.contains("[Space/Enter/C]ommit  [D]escribe: "));
+    }
+
+    #[test]
+    fn prompt_commit_menu_wording_scoped_offers_split_not_describe() {
+        let mut input = Cursor::new(b"c\n".to_vec());
+        let mut output = Vec::new();
+        prompt_commit(&mut input, &mut output, &choices(true), false).unwrap();
+        let printed = String::from_utf8(output).unwrap();
+        assert!(printed.contains("[Space/Enter/C]ommit  [S]plit: "));
+        assert!(!printed.contains("[D]escribe"));
+    }
+
+    #[test]
+    fn prompt_commit_reprints_menu_and_retries_on_invalid_input() {
+        // "x" and "0" (the old numeric input, now invalid) both retry; the blank line
+        // then selects the default — three menu prints in all.
+        let mut input = Cursor::new(b"x\n0\n\n".to_vec());
+        let mut output = Vec::new();
+        let picked = prompt_commit(&mut input, &mut output, &choices(false), false).unwrap();
         assert_eq!(picked, JjCommitCommand::Commit);
         let printed = String::from_utf8(output).unwrap();
-        assert_eq!(printed.matches("0) jj commit").count(), 2);
+        assert_eq!(printed.matches("[Space/Enter/C]ommit").count(), 3);
     }
 
     #[test]
-    fn prompt_marks_the_default_choice_in_the_menu() {
-        let mut input = Cursor::new(b"0\n".to_vec());
+    fn prompt_commit_ctrl_d_byte_cancels() {
+        let mut input = Cursor::new(vec![0x04]);
         let mut output = Vec::new();
-        prompt(&mut input, &mut output, &choices(false), Some(0)).unwrap();
-        let printed = String::from_utf8(output).unwrap();
-        assert_eq!(printed, "0) jj commit  (default)\n1) jj describe\n");
-    }
-
-    #[test]
-    fn prompt_prints_no_default_marker_when_default_is_none() {
-        let mut input = Cursor::new(b"0\n".to_vec());
-        let mut output = Vec::new();
-        prompt(&mut input, &mut output, &choices(false), None).unwrap();
-        let printed = String::from_utf8(output).unwrap();
-        assert!(!printed.contains("(default)"));
-    }
-
-    #[test]
-    fn prompt_cancels_on_eof_without_a_valid_selection() {
-        let mut input = Cursor::new(Vec::new());
-        let mut output = Vec::new();
-        let result = prompt(&mut input, &mut output, &choices(false), None);
+        let result = prompt_commit(&mut input, &mut output, &choices(false), false);
         assert!(matches!(result, Err(PickerError::Cancelled)));
     }
 
     #[test]
-    fn prompt_eof_still_cancels_even_with_a_default_set() {
-        // True EOF (0 bytes read) is checked before any blank-line/default handling, so
-        // it must still cancel even when a default is available — EOF signals a closed/
-        // non-interactive stdin, not the user pressing Enter.
-        let mut input = Cursor::new(Vec::new());
-        let mut output = Vec::new();
-        let result = prompt(&mut input, &mut output, &choices(false), Some(0));
-        assert!(matches!(result, Err(PickerError::Cancelled)));
-    }
-
-    #[test]
-    fn prompt_cancels_on_eof_after_some_invalid_attempts() {
+    fn prompt_commit_cancels_on_eof_after_some_invalid_attempts() {
         let mut input = Cursor::new(b"garbage\n".to_vec());
         let mut output = Vec::new();
-        let result = prompt(&mut input, &mut output, &choices(false), None);
+        let result = prompt_commit(&mut input, &mut output, &choices(false), false);
         assert!(matches!(result, Err(PickerError::Cancelled)));
     }
 
     #[test]
-    fn a_genuine_io_error_is_not_reported_as_cancelled() {
-        // Invalid UTF-8 makes `read_line` itself return `Err`, not `Ok(0)` — this must
-        // not be conflated with true EOF (which alone means "the user cancelled").
-        let mut input = Cursor::new(vec![0xFF, 0xFE, b'\n']);
+    fn prompt_commit_line_mode_drains_the_rest_of_the_line() {
+        // "d" alone selects Describe; the trailing garbage before the newline must be
+        // discarded so it doesn't leak into whatever reads `input` next.
+        let mut input = Cursor::new(b"dXYZ\nx\n".to_vec());
         let mut output = Vec::new();
-        let result = prompt(&mut input, &mut output, &choices(false), None);
+        let picked = prompt_commit(&mut input, &mut output, &choices(false), false).unwrap();
+        assert_eq!(picked, JjCommitCommand::Describe);
+        let mut rest = String::new();
+        input.read_to_string(&mut rest).unwrap();
+        assert_eq!(rest, "x\n");
+    }
+
+    #[test]
+    fn prompt_commit_io_error_is_not_reported_as_cancelled() {
+        let mut input = FailingReader;
+        let mut output = Vec::new();
+        let result = prompt_commit(&mut input, &mut output, &choices(false), false);
         assert!(matches!(result, Err(PickerError::Io(_))));
     }
 
@@ -724,9 +776,10 @@ mod tests {
         assert!(matches!(result, Err(PickerError::Cancelled)));
     }
 
-    /// A `BufRead` double whose every read fails — used to exercise `prompt_action`'s
-    /// non-EOF I/O-error path, which real UTF-8-agnostic byte reads (unlike
-    /// `read_line`) can't otherwise be made to hit via a plain `Cursor`.
+    /// A `BufRead` double whose every read fails — used to exercise the non-EOF
+    /// I/O-error path of `prompt_action`/`prompt_commit` (via `read_key`), which real
+    /// UTF-8-agnostic byte reads (unlike `read_line`) can't otherwise be made to hit via
+    /// a plain `Cursor`.
     struct FailingReader;
 
     impl Read for FailingReader {

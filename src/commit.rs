@@ -17,7 +17,8 @@ use std::path::Path;
 /// jj repository, `files` (the same scope `diff::generate` resolved) is threaded
 /// through to the picked jj command unchanged, so the commit matches what `message`
 /// describes; a non-empty `files` also determines whether `jj split` (scoped) or `jj
-/// describe` (unscoped) is offered.
+/// describe` (unscoped) is offered. `raw` is forwarded to the jj commit-command picker:
+/// `true` (a real terminal) makes it a single-keypress prompt (see [`picker::prompt_commit`]).
 ///
 /// # Errors
 /// [`crate::error::PickerCancelled`] (exit 14, jj only) or [`CommitError`] (exit 16).
@@ -28,10 +29,11 @@ pub fn commit(
     cwd: &Path,
     stdin: &mut dyn BufRead,
     stderr: &mut dyn std::io::Write,
+    raw: bool,
 ) -> Result<(), CcmError> {
     match handling {
         RepoHandling::Git { .. } => commit_git(message, cwd, stderr),
-        RepoHandling::Jj { .. } => commit_jj(message, files, cwd, stdin, stderr),
+        RepoHandling::Jj { .. } => commit_jj(message, files, cwd, stdin, stderr, raw),
     }
 }
 
@@ -55,6 +57,7 @@ fn commit_jj(
     cwd: &Path,
     stdin: &mut dyn BufRead,
     stderr: &mut dyn std::io::Write,
+    raw: bool,
 ) -> Result<(), CcmError> {
     // A scope was given iff `files` is non-empty by the time commit() is called: the
     // "exclude everything" empty-scope case was already short-circuited to exit 8 in
@@ -63,8 +66,11 @@ fn commit_jj(
     let scoped = !files.is_empty();
     let choices = picker::choices(scoped);
     // `jj commit` is always index 0 (see `choices`' own doc comment), so it's the
-    // picker's default: a blank line (Enter) selects it without the user typing "0".
-    let picked = picker::prompt(stdin, stderr, &choices, Some(0)).map_err(picker::to_ccm_error)?;
+    // picker's default: a space or Enter selects it without the user typing `c`. `raw`
+    // (a real terminal — see pipeline::run) makes it a single-keypress prompt, exactly
+    // like the message review prompt that precedes it.
+    let picked =
+        picker::prompt_commit(stdin, stderr, &choices, raw).map_err(picker::to_ccm_error)?;
     let _ = progress::blank_line(stderr);
 
     let args = argv::jj_commit_command_args(picked, message, files);
@@ -143,6 +149,7 @@ mod tests {
             repo.path(),
             &mut stdin,
             &mut stderr,
+            false,
         )
         .unwrap();
 
@@ -170,6 +177,7 @@ mod tests {
             repo.path(),
             &mut stdin,
             &mut stderr,
+            false,
         )
         .unwrap_err();
         assert_eq!(err.exit_code().as_u8(), 16);
@@ -180,12 +188,20 @@ mod tests {
         let (_tmp, repo) = jj_repo();
         std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
         let handling = RepoHandling::Jj { root: repo.clone() };
-        let mut stdin = Cursor::new(b"0\n".to_vec());
+        let mut stdin = Cursor::new(b"c\n".to_vec());
         let mut stderr = Vec::new();
-        commit(&handling, "feat: x", &[], &repo, &mut stdin, &mut stderr).unwrap();
+        commit(
+            &handling,
+            "feat: x",
+            &[],
+            &repo,
+            &mut stdin,
+            &mut stderr,
+            false,
+        )
+        .unwrap();
         let logged = String::from_utf8(stderr).unwrap();
-        assert!(logged.contains("0) jj commit"));
-        assert!(logged.contains("1) jj describe"));
+        assert!(logged.contains("[Space/Enter/C]ommit  [D]escribe: "));
     }
 
     #[test]
@@ -193,7 +209,7 @@ mod tests {
         let (_tmp, repo) = jj_repo();
         std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
         let handling = RepoHandling::Jj { root: repo.clone() };
-        let mut stdin = Cursor::new(b"0\n".to_vec());
+        let mut stdin = Cursor::new(b"c\n".to_vec());
         let mut stderr = Vec::new();
         commit(
             &handling,
@@ -202,10 +218,11 @@ mod tests {
             &repo,
             &mut stdin,
             &mut stderr,
+            false,
         )
         .unwrap();
         let logged = String::from_utf8(stderr).unwrap();
-        assert!(logged.contains("1) jj split"));
+        assert!(logged.contains("[Space/Enter/C]ommit  [S]plit: "));
     }
 
     #[test]
@@ -215,7 +232,16 @@ mod tests {
         let handling = RepoHandling::Jj { root: repo.clone() };
         let mut stdin = Cursor::new(Vec::new());
         let mut stderr = Vec::new();
-        let err = commit(&handling, "feat: x", &[], &repo, &mut stdin, &mut stderr).unwrap_err();
+        let err = commit(
+            &handling,
+            "feat: x",
+            &[],
+            &repo,
+            &mut stdin,
+            &mut stderr,
+            false,
+        )
+        .unwrap_err();
         assert_eq!(err.exit_code().as_u8(), 14);
     }
 
@@ -227,7 +253,7 @@ mod tests {
         let handling = RepoHandling::Jj {
             root: tmp.path().to_path_buf(),
         };
-        let mut stdin = Cursor::new(b"0\n".to_vec());
+        let mut stdin = Cursor::new(b"c\n".to_vec());
         let mut stderr = Vec::new();
         let err = commit(
             &handling,
@@ -236,6 +262,7 @@ mod tests {
             tmp.path(),
             &mut stdin,
             &mut stderr,
+            false,
         )
         .unwrap_err();
         assert_eq!(err.exit_code().as_u8(), 16);

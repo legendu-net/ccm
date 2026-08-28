@@ -252,6 +252,7 @@ pub fn run_with(
         &cwd,
         stdin,
         stderr,
+        raw,
     )?;
     Ok(())
 }

@@ -190,10 +190,12 @@ fn invalid_input_reprints_the_prompt_before_accepting() {
 }
 
 #[test]
-fn blank_generation_offers_no_accept_and_a_blank_line_edits() {
+fn blank_generation_offers_no_accept_and_a_blank_line_regenerates() {
     // The fake agent prints nothing, so generation is blank; the review prompt must
     // offer only regenerate/edit (no "accept" text at all), and a blank line there
-    // selects edit — not a no-op "commit nothing", which would be nonsensical.
+    // automatically retries generation instead of dropping straight into $EDITOR — the
+    // agent is still blank on retry, so a second blank line's worth of stdin is
+    // consumed by that regenerate before "e" finally switches to edit.
     let fx = Fixture::new();
     fx.init_git();
     fx.write_script("ccm-test-agent", "true");
@@ -210,7 +212,7 @@ fn blank_generation_offers_no_accept_and_a_blank_line_edits() {
         .env("EDITOR", "ed")
         .args(["--config"])
         .arg(fx.config_dir())
-        .write_stdin("\n")
+        .write_stdin("\ne\n")
         .assert()
         .code(0);
 
@@ -218,6 +220,12 @@ fn blank_generation_offers_no_accept_and_a_blank_line_edits() {
     assert!(
         !stderr.contains("accept"),
         "a blank generation must not offer accept in:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("Generating commit message using").count(),
+        2,
+        "expected the initial generation plus one regenerate (from the blank-line \
+         default) before edit was selected, in:\n{stderr}"
     );
     assert_eq!(last_commit_subject(&fx), "feat: written from scratch");
 }

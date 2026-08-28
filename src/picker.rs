@@ -215,8 +215,9 @@ pub enum ReviewAction {
 /// [`ReviewAction::Accept`] when `allow_accept` (and a retry otherwise, since a blank
 /// generation offers no accept option); a space or Enter (`\n`/`\r`) is the prompt's
 /// default action — [`ReviewAction::Accept`] when `allow_accept` (a non-blank generated
-/// message), or [`ReviewAction::Edit`] otherwise, since a blank generation has nothing
-/// worth accepting (see "Message review prompt"). Any other byte is a retry (`None`).
+/// message), or [`ReviewAction::Regenerate`] otherwise, since a blank generation has
+/// nothing worth accepting or editing yet, so a bare Enter just tries generation again
+/// (see "Message review prompt"). Any other byte is a retry (`None`).
 ///
 /// Ctrl-D (`0x04`) is deliberately not classified here: unlike every other
 /// unrecognized byte, it doesn't mean "keep asking, try again" — it cancels the prompt
@@ -230,7 +231,7 @@ pub fn interpret_action(byte: u8, allow_accept: bool) -> Option<ReviewAction> {
         b' ' | b'\n' | b'\r' => Some(if allow_accept {
             ReviewAction::Accept
         } else {
-            ReviewAction::Edit
+            ReviewAction::Regenerate
         }),
         _ => None,
     }
@@ -241,10 +242,10 @@ fn print_action_menu(writer: &mut (impl Write + ?Sized), allow_accept: bool) {
     if allow_accept {
         let _ = write!(
             writer,
-            "[R]egenerate    [E]dit    [Space/Enter/A]ccept as is: "
+            "[Space/Enter/A]ccept as is    [R]egenerate    [E]dit: "
         );
     } else {
-        let _ = write!(writer, "[R]egenerate    [Space/Enter] edit: ");
+        let _ = write!(writer, "[Space/Enter/R]egenerate    [E]dit: ");
     }
     let _ = writer.flush();
 }
@@ -332,11 +333,12 @@ fn read_key(reader: &mut (impl BufRead + ?Sized), raw: bool) -> Result<u8, Picke
 
 /// Runs the message review prompt (prd.md "Message review prompt") to a selection:
 /// prints a `What to do with the generated message?` heading followed by
-/// `[R]egenerate    [E]dit    [Space/Enter/A]ccept as is: ` (or, when `allow_accept` is
-/// `false` — the generated message is blank — `[R]egenerate    [Space/Enter] edit: `),
-/// reads a single key via `read_key`, and repeats (heading included) on any input
-/// [`interpret_action`] doesn't recognize. See `read_key` for the raw-vs-line-mode and
-/// EOF/Ctrl-D behavior. A newline is written after a valid selection, since raw mode
+/// `[Space/Enter/A]ccept as is    [R]egenerate    [E]dit: ` (or, when `allow_accept` is
+/// `false` — the generated message is blank — `[Space/Enter/R]egenerate    [E]dit: `,
+/// since there's nothing worth accepting yet, so a bare Enter just tries generation
+/// again), reads a single key via `read_key`, and repeats (heading included) on any
+/// input [`interpret_action`] doesn't recognize. See `read_key` for the raw-vs-line-mode
+/// and EOF/Ctrl-D behavior. A newline is written after a valid selection, since raw mode
 /// echoes nothing back to the terminal on its own.
 ///
 /// # Errors
@@ -702,12 +704,18 @@ mod tests {
     }
 
     #[test]
-    fn interpret_action_default_is_edit_when_accept_not_allowed() {
-        // A blank generation has nothing worth accepting, so Space/Enter falls back to
-        // Edit instead — and Accept is unreachable no matter what key is pressed, the
-        // explicit `a`/`A` accept key included (it's a retry then).
-        assert_eq!(interpret_action(b' ', false), Some(ReviewAction::Edit));
-        assert_eq!(interpret_action(b'\n', false), Some(ReviewAction::Edit));
+    fn interpret_action_default_is_regenerate_when_accept_not_allowed() {
+        // A blank generation has nothing worth accepting or editing yet, so Space/Enter
+        // falls back to Regenerate instead — and Accept is unreachable no matter what
+        // key is pressed, the explicit `a`/`A` accept key included (it's a retry then).
+        assert_eq!(
+            interpret_action(b' ', false),
+            Some(ReviewAction::Regenerate)
+        );
+        assert_eq!(
+            interpret_action(b'\n', false),
+            Some(ReviewAction::Regenerate)
+        );
         assert_eq!(interpret_action(b'a', false), None);
         assert_eq!(interpret_action(b'A', false), None);
     }
@@ -752,11 +760,11 @@ mod tests {
     }
 
     #[test]
-    fn prompt_action_blank_line_edits_when_accept_is_not_allowed() {
+    fn prompt_action_blank_line_regenerates_when_accept_is_not_allowed() {
         let mut input = Cursor::new(b"\n".to_vec());
         let mut output = Vec::new();
         let action = prompt_action(&mut input, &mut output, false, false).unwrap();
-        assert_eq!(action, ReviewAction::Edit);
+        assert_eq!(action, ReviewAction::Regenerate);
     }
 
     #[test]
@@ -766,17 +774,17 @@ mod tests {
         prompt_action(&mut input, &mut output, true, false).unwrap();
         let printed = String::from_utf8(output).unwrap();
         assert!(printed.contains("What to do with the generated message?"));
-        assert!(printed.contains("[R]egenerate    [E]dit    [Space/Enter/A]ccept as is: "));
+        assert!(printed.contains("[Space/Enter/A]ccept as is    [R]egenerate    [E]dit: "));
     }
 
     #[test]
-    fn prompt_action_menu_wording_offers_edit_default_when_not_allowed() {
+    fn prompt_action_menu_wording_offers_regenerate_default_when_not_allowed() {
         let mut input = Cursor::new(b"\n".to_vec());
         let mut output = Vec::new();
         prompt_action(&mut input, &mut output, false, false).unwrap();
         let printed = String::from_utf8(output).unwrap();
         assert!(printed.contains("What to do with the generated message?"));
-        assert!(printed.contains("[R]egenerate    [Space/Enter] edit: "));
+        assert!(printed.contains("[Space/Enter/R]egenerate    [E]dit: "));
         assert!(!printed.contains("accept"));
     }
 

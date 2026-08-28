@@ -91,12 +91,12 @@ Supported platforms: Linux and macOS only. Windows is out of scope — no
 
 7. Default to reviewing: after generation, prompt the user to regenerate, edit, or
     accept the generated message (see "Message review prompt" in CLI Interface) —
-    defaulting to accept (or edit, when generation came back blank, since there is
-    nothing worth accepting), giving the user a chance to write their own even when
-    generation came back blank. Accept commits the message as-is; edit opens it in
-    `$EDITOR` first, same as before; regenerate re-runs generation against the same
-    selected entry and the same diff, then prompts again. After a non-blank message is
-    settled on, commit it automatically.
+    defaulting to accept (or regenerate, when generation came back blank, since there is
+    nothing worth accepting or editing yet — a bare Enter just retries generation, while
+    edit is still there for the user to write their own by hand). Accept commits the
+    message as-is; edit opens it in `$EDITOR` first, same as before; regenerate re-runs
+    generation against the same selected entry and the same diff, then prompts again.
+    After a non-blank message is settled on, commit it automatically.
     Support `--dry-run` to print the message to stdout instead,
     without showing the review prompt, opening the editor, or committing. Under
     `--dry-run` a blank generated message has no such chance to be fixed up, and is a
@@ -631,14 +631,14 @@ single keypress, and a poor one can be thrown away and re-requested without leav
 
 ```
 What to do with the generated message?
-[R]egenerate    [E]dit    [Space/Enter/A]ccept as is:
+[Space/Enter/A]ccept as is    [R]egenerate    [E]dit:
 ```
 
 or, when generation came back blank (nothing worth accepting yet):
 
 ```
 What to do with the generated message?
-[R]egenerate    [Space/Enter] edit:
+[Space/Enter/R]egenerate    [E]dit:
 ```
 
 - **Regenerate** (`r`/`R`) re-runs stage 7 (message generation) against the same
@@ -656,12 +656,13 @@ What to do with the generated message?
     still hits exit 15 rather than committing garbage.
 - Accept is only offered when the current message is non-blank: a blank generation has
     nothing worth accepting (accepting it would just be exit 15 with extra steps), so the
-    prompt instead offers only regenerate/edit, with a space or Enter defaulting to edit
-    instead of accept — preserving the "always give the user a chance to write their own"
-    guarantee (Requirement 7) a blank generation has always had.
+    prompt instead offers only edit/regenerate, with a space or Enter defaulting to
+    regenerate instead of accept — a blank result usually just means the backend needs
+    another try, so a bare Enter retries generation immediately; `e`/`E` is still there to
+    write the message by hand instead.
 
 On a real terminal, the prompt reads a single keypress — no Enter needed for `r`/`e`/`a`;
-Space or Enter accepts (or edits, per the blank-message rule above) immediately. When
+Space or Enter accepts (or regenerates, per the blank-message rule above) immediately. When
 stdin isn't a real terminal (piped, redirected, or any non-interactive caller), the
 prompt instead reads a whole line and inspects only its first character, the
 line-oriented style every other picker falls back to off a terminal — so a scripted

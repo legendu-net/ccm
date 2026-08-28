@@ -848,13 +848,15 @@ single-keypress prompt rather than a fuzzy-finder UI, styled exactly like the me
 review prompt above. `ccm` prints one of the following to stderr:
 
 ```
-[Space/Enter/C]ommit  [D]escribe:
+Which jj command to use?
+[Space/Enter/C]ommit    [D]escribe:
 ```
 
 or, when `--include`/`--exclude` was given (so `jj split` replaces `jj describe`):
 
 ```
-[Space/Enter/C]ommit  [S]plit:
+Which jj command to use?
+[Space/Enter/C]ommit    [S]plit:
 ```
 
 - `c`/`C` selects `jj commit`.

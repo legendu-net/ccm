@@ -199,7 +199,7 @@ mod tests {
         )
         .unwrap();
         let logged = String::from_utf8(stderr).unwrap();
-        assert!(logged.contains("[Space/Enter/C]ommit  [D]escribe: "));
+        assert!(logged.contains("[Space/Enter/C]ommit    [D]escribe: "));
     }
 
     #[test]
@@ -220,7 +220,7 @@ mod tests {
         )
         .unwrap();
         let logged = String::from_utf8(stderr).unwrap();
-        assert!(logged.contains("[Space/Enter/C]ommit  [S]plit: "));
+        assert!(logged.contains("[Space/Enter/C]ommit    [S]plit: "));
     }
 
     #[test]

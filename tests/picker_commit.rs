@@ -97,7 +97,7 @@ fn jj_unscoped_picker_offers_commit_and_describe_and_commits_via_describe() {
         .assert()
         .code(0)
         .stderr(
-            predicate::str::contains("[Space/Enter/C]ommit  [D]escribe: ")
+            predicate::str::contains("[Space/Enter/C]ommit    [D]escribe: ")
                 .and(predicate::str::contains("Committed using: jj describe")),
         );
 
@@ -130,7 +130,7 @@ fn jj_scoped_picker_offers_commit_and_split_not_describe() {
         .assert()
         .code(0)
         .stderr(
-            predicate::str::contains("[Space/Enter/C]ommit  [S]plit: ")
+            predicate::str::contains("[Space/Enter/C]ommit    [S]plit: ")
                 .and(predicate::str::contains("[D]escribe").not())
                 .and(predicate::str::contains("Committed using: jj commit")),
         );
@@ -205,7 +205,7 @@ fn jj_picker_blank_input_selects_commit_as_the_default() {
         .assert()
         .code(0)
         .stderr(
-            predicate::str::contains("[Space/Enter/C]ommit  [D]escribe: ")
+            predicate::str::contains("[Space/Enter/C]ommit    [D]escribe: ")
                 .and(predicate::str::contains("Committed using: jj commit")),
         );
 }

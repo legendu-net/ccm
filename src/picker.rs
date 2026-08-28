@@ -78,15 +78,21 @@ fn print_commit_menu(writer: &mut (impl Write + ?Sized), choices: &[JjCommitComm
     // `choices[0]` is always `jj commit` (see `choices`), and a space/Enter selects it,
     // hence the fixed `[Space/Enter/C]ommit` prefix; `choices[1]` is the describe-or-split
     // alternative.
-    let _ = write!(writer, "[Space/Enter/C]ommit  {}: ", key_label(choices[1]));
+    let _ = writeln!(writer, "Which jj command to use?");
+    let _ = write!(
+        writer,
+        "[Space/Enter/C]ommit    {}: ",
+        key_label(choices[1])
+    );
     let _ = writer.flush();
 }
 
 /// Runs the jj commit-command picker (prd.md "jj commit commands") to a selection:
-/// prints `[Space/Enter/C]ommit  [D]escribe: ` (or `[S]plit`, whichever [`choices`]
-/// offers at index 1), reads a single key, and repeats on any input
-/// [`interpret_commit_key`] doesn't recognize. `jj commit` is always on offer and is the
-/// default — a space or Enter selects it — so there is no separate `(default)` marker.
+/// prints a `Which jj command to use?` heading followed by `[Space/Enter/C]ommit
+/// [D]escribe: ` (or `[S]plit`, whichever [`choices`] offers at index 1), reads a single
+/// key, and repeats (heading included) on any input [`interpret_commit_key`] doesn't
+/// recognize. `jj commit` is always on offer and is the default — a space or Enter
+/// selects it — so there is no separate `(default)` marker.
 ///
 /// Raw-vs-line-mode handling and EOF/Ctrl-D cancellation are exactly [`prompt_action`]'s:
 /// both read through `read_key`, so `raw` means the same single-keypress-on-a-real-
@@ -486,7 +492,8 @@ mod tests {
         let mut output = Vec::new();
         prompt_commit(&mut input, &mut output, &choices(false), false).unwrap();
         let printed = String::from_utf8(output).unwrap();
-        assert!(printed.contains("[Space/Enter/C]ommit  [D]escribe: "));
+        assert!(printed.contains("Which jj command to use?"));
+        assert!(printed.contains("[Space/Enter/C]ommit    [D]escribe: "));
     }
 
     #[test]
@@ -495,7 +502,8 @@ mod tests {
         let mut output = Vec::new();
         prompt_commit(&mut input, &mut output, &choices(true), false).unwrap();
         let printed = String::from_utf8(output).unwrap();
-        assert!(printed.contains("[Space/Enter/C]ommit  [S]plit: "));
+        assert!(printed.contains("Which jj command to use?"));
+        assert!(printed.contains("[Space/Enter/C]ommit    [S]plit: "));
         assert!(!printed.contains("[D]escribe"));
     }
 

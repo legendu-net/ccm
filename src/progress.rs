@@ -116,12 +116,18 @@ pub fn committed_using(out: &mut (impl Write + ?Sized), command: &str) -> io::Re
     writeln!(out, "Committed using: {command}")
 }
 
-/// A blank line separating one group of progress lines (e.g. everything logged by a
-/// single pipeline stage) from the next, so related lines visually cluster together
-/// instead of running into one undifferentiated block.
-pub fn blank_line(out: &mut (impl Write + ?Sized)) -> io::Result<()> {
-    writeln!(out)
+/// An `====` divider separating one group of progress lines (e.g. everything logged by
+/// a single pipeline stage) from the next, so related lines visually cluster together
+/// instead of running into one undifferentiated block. Heavier than the `----`
+/// `DASH_LINE` used inside a single stage (e.g. around the message dump in
+/// `raw_and_cleaned_message`), so the two nest into a two-level hierarchy rather than
+/// competing for attention at the same weight. A single blank line turned out to be too
+/// faint to register as a boundary when scrolling through a wall of stderr output.
+pub fn section_break(out: &mut (impl Write + ?Sized)) -> io::Result<()> {
+    writeln!(out, "{EQUALS_LINE}")
 }
+
+const EQUALS_LINE: &str = "========================================";
 
 /// Logged once the tool picker's `fzf` front-end couldn't run (not on `$PATH`, no
 /// controlling terminal, or any other failure — see `fzf::FzfOutcome::Unavailable`)
@@ -231,8 +237,8 @@ mod tests {
     }
 
     #[test]
-    fn blank_line_writes_a_single_empty_line() {
-        assert_eq!(captured(|w| blank_line(w)), "\n");
+    fn section_break_writes_a_single_equals_line() {
+        assert_eq!(captured(|w| section_break(w)), format!("{EQUALS_LINE}\n"));
     }
 
     #[test]

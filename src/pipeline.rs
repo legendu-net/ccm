@@ -167,7 +167,7 @@ pub fn run_with(
         } else {
             picker::prompt_index(stdin, stderr, &lines, default).map_err(picker::to_ccm_error)?
         };
-        let _ = progress::blank_line(stderr);
+        let _ = progress::section_break(stderr);
         &loaded.entries[index]
     };
 
@@ -216,7 +216,7 @@ pub fn run_with(
         // see `picker::prompt_action`'s `allow_accept` parameter.
         let action =
             picker::prompt_action(stdin, stderr, !blank, raw).map_err(picker::to_ccm_error)?;
-        let _ = progress::blank_line(stderr);
+        let _ = progress::section_break(stderr);
         match action {
             picker::ReviewAction::Regenerate => {
                 message = generation::generate(

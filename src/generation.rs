@@ -66,7 +66,7 @@ pub fn generate(
     } else {
         let _ = progress::commit_message_generated(stderr, &entry.name, model, resolved_model);
     }
-    let _ = progress::blank_line(stderr);
+    let _ = progress::section_break(stderr);
 
     Ok(message)
 }

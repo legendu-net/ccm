@@ -70,7 +70,7 @@ fn commit_jj(
     // like the message review prompt that precedes it.
     let picked =
         picker::prompt_commit(stdin, stderr, &choices, raw).map_err(picker::to_ccm_error)?;
-    let _ = progress::blank_line(stderr);
+    let _ = progress::section_break(stderr);
 
     let args = argv::jj_commit_command_args(picked, message, files);
     let command = argv::render_command("jj", &args);

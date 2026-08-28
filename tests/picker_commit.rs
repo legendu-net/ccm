@@ -34,10 +34,7 @@ fn git_commit_happy_path_creates_a_real_commit() {
         .write_stdin("\n")
         .assert()
         .code(0)
-        .stderr(
-            predicate::str::contains("Committing using: git commit")
-                .and(predicate::str::contains("Committed using:")),
-        );
+        .stderr(predicate::str::contains("Committed using: git commit"));
 
     let log = Command::new("git")
         .args(["log", "-1", "--format=%s"])
@@ -101,8 +98,7 @@ fn jj_unscoped_picker_offers_commit_and_describe_and_commits_via_describe() {
         .code(0)
         .stderr(
             predicate::str::contains("[Space/Enter/C]ommit  [D]escribe: ")
-                .and(predicate::str::contains("Committing using: jj describe"))
-                .and(predicate::str::contains("Committed using:")),
+                .and(predicate::str::contains("Committed using: jj describe")),
         );
 
     let log = Command::new("jj")
@@ -136,7 +132,7 @@ fn jj_scoped_picker_offers_commit_and_split_not_describe() {
         .stderr(
             predicate::str::contains("[Space/Enter/C]ommit  [S]plit: ")
                 .and(predicate::str::contains("[D]escribe").not())
-                .and(predicate::str::contains("Committing using: jj commit")),
+                .and(predicate::str::contains("Committed using: jj commit")),
         );
 }
 
@@ -189,7 +185,7 @@ fn jj_picker_reprompts_on_invalid_input_before_succeeding() {
         .write_stdin("\ngarbage\n2\nd\n") // review prompt: accept; then the jj picker
         .assert()
         .code(0)
-        .stderr(predicate::str::contains("Committing using: jj describe"));
+        .stderr(predicate::str::contains("Committed using: jj describe"));
 }
 
 #[test]
@@ -210,7 +206,7 @@ fn jj_picker_blank_input_selects_commit_as_the_default() {
         .code(0)
         .stderr(
             predicate::str::contains("[Space/Enter/C]ommit  [D]escribe: ")
-                .and(predicate::str::contains("Committing using: jj commit")),
+                .and(predicate::str::contains("Committed using: jj commit")),
         );
 }
 

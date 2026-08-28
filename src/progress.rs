@@ -103,10 +103,6 @@ fn format_model(model: &str, resolved_model: Option<&str>) -> String {
     }
 }
 
-pub fn committing_using(out: &mut (impl Write + ?Sized), command: &str) -> io::Result<()> {
-    writeln!(out, "Committing using: {command}")
-}
-
 pub fn committed_using(out: &mut (impl Write + ?Sized), command: &str) -> io::Result<()> {
     writeln!(out, "Committed using: {command}")
 }
@@ -226,10 +222,6 @@ mod tests {
 
     #[test]
     fn commit_lines_match_spec_wording() {
-        assert_eq!(
-            captured(|w| committing_using(w, "git commit -m ...")),
-            "Committing using: git commit -m ...\n"
-        );
         assert_eq!(
             captured(|w| committed_using(w, "git commit -m ...")),
             "Committed using: git commit -m ...\n"

@@ -40,7 +40,6 @@ pub fn commit(
 fn commit_git(message: &str, cwd: &Path, stderr: &mut dyn std::io::Write) -> Result<(), CcmError> {
     let args = argv::git_commit_args(message);
     let command = argv::render_command("git", &args);
-    let _ = progress::committing_using(stderr, &command);
 
     let captured = exec::run_simple("git", args, cwd).map_err(CommitError)?;
     if !captured.success {
@@ -75,7 +74,6 @@ fn commit_jj(
 
     let args = argv::jj_commit_command_args(picked, message, files);
     let command = argv::render_command("jj", &args);
-    let _ = progress::committing_using(stderr, &command);
 
     let captured = exec::run_simple("jj", args, cwd).map_err(CommitError)?;
     if !captured.success {

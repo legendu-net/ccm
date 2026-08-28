@@ -64,11 +64,9 @@ fn staged_changes_are_diffed() {
         .args(["--dry-run", "--config"])
         .arg(fx.config_dir())
         .assert();
-    assert
-        .code(0)
-        .stderr(predicate::str::contains(
-            "Generating diff using: git --no-pager diff --no-color --staged",
-        ));
+    assert.code(0).stderr(predicate::str::contains(
+        "Generating diff using: git --no-pager diff --no-color --staged",
+    ));
 }
 
 #[test]

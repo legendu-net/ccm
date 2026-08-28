@@ -14,9 +14,9 @@
 //! when it's known and differs: `openai_api` entries can route through a gateway (e.g.
 //! OmniRoute) that picks the real upstream model dynamically, which the configured
 //! `<model>` doesn't capture on its own. This isn't from prd.md's "Progress logging"
-//! list — neither is [`raw_message`]/[`cleaned_message`], which dump the backend's
-//! response before and after `cleanup::clean_message` so a fence/quote-stripping bug
-//! (or an LLM's own formatting choice) is visible directly in the log rather than only
+//! list — neither is [`raw_and_cleaned_message`], which dumps the backend's response
+//! before and after `cleanup::clean_message` so a fence/quote-stripping bug (or an
+//! LLM's own formatting choice) is visible directly in the log rather than only
 //! inferable from the final message.
 
 use std::io::{self, Write};
@@ -47,18 +47,27 @@ pub fn generating_commit_message(
     writeln!(out, "Generating commit message using {name} ({model})…")
 }
 
-/// The backend's response exactly as returned, before `cleanup::clean_message` strips
-/// any wrapping code fence or quotes. Preceded by a dash line since the message itself
-/// can span multiple lines, making it hard to tell where it starts without one.
-pub fn raw_message(out: &mut (impl Write + ?Sized), message: &str) -> io::Result<()> {
-    writeln!(out, "{DASH_LINE}\nRaw message:\n{message}")
-}
-
-/// The response after `cleanup::clean_message`, whether or not it actually changed
-/// anything — identical output to `raw_message` confirms cleanup was a no-op. Preceded
-/// by a dash line for the same reason as `raw_message`.
-pub fn cleaned_message(out: &mut (impl Write + ?Sized), message: &str) -> io::Result<()> {
-    writeln!(out, "{DASH_LINE}\nCleaned message:\n{message}")
+/// Logs the backend's response exactly as returned (`raw`) alongside the result of
+/// running it through `cleanup::clean_message` (`cleaned`). When `cleanup` was a no-op
+/// (the common case), collapses both into a single `Raw/Cleaned message:` dump instead
+/// of printing the same text twice; when it actually stripped a wrapping code fence or
+/// quotes, prints `Raw message:` and `Cleaned message:` separately so the difference is
+/// visible directly in the log rather than only inferable from the final message.
+/// Preceded by a dash line since the message itself can span multiple lines, making it
+/// hard to tell where it starts without one.
+pub fn raw_and_cleaned_message(
+    out: &mut (impl Write + ?Sized),
+    raw: &str,
+    cleaned: &str,
+) -> io::Result<()> {
+    if raw == cleaned {
+        writeln!(out, "{DASH_LINE}\nRaw/Cleaned message:\n{raw}")
+    } else {
+        writeln!(
+            out,
+            "{DASH_LINE}\nRaw message:\n{raw}\n{DASH_LINE}\nCleaned message:\n{cleaned}"
+        )
+    }
 }
 
 const DASH_LINE: &str = "----------------------------------------";
@@ -172,14 +181,20 @@ mod tests {
     }
 
     #[test]
-    fn raw_and_cleaned_message_lines_carry_the_message_verbatim() {
+    fn raw_and_cleaned_message_collapses_to_one_dump_when_identical() {
         assert_eq!(
-            captured(|w| raw_message(w, "```\nfeat: add x\n```")),
-            format!("{DASH_LINE}\nRaw message:\n```\nfeat: add x\n```\n")
+            captured(|w| raw_and_cleaned_message(w, "feat: add x", "feat: add x")),
+            format!("{DASH_LINE}\nRaw/Cleaned message:\nfeat: add x\n")
         );
+    }
+
+    #[test]
+    fn raw_and_cleaned_message_prints_both_separately_when_cleanup_changed_something() {
         assert_eq!(
-            captured(|w| cleaned_message(w, "feat: add x")),
-            format!("{DASH_LINE}\nCleaned message:\nfeat: add x\n")
+            captured(|w| raw_and_cleaned_message(w, "```\nfeat: add x\n```", "feat: add x")),
+            format!(
+                "{DASH_LINE}\nRaw message:\n```\nfeat: add x\n```\n{DASH_LINE}\nCleaned message:\nfeat: add x\n"
+            )
         );
     }
 

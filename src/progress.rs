@@ -49,25 +49,36 @@ pub fn generating_commit_message(
 
 /// Logs the backend's response exactly as returned (`raw`) alongside the result of
 /// running it through `cleanup::clean_message` (`cleaned`). When `cleanup` was a no-op
-/// (the common case), collapses both into a single `Raw/Cleaned message:` dump instead
+/// (the common case), collapses both into a single `Raw/Cleaned message` dump instead
 /// of printing the same text twice; when it actually stripped a wrapping code fence or
-/// quotes, prints `Raw message:` and `Cleaned message:` separately so the difference is
-/// visible directly in the log rather than only inferable from the final message.
-/// Preceded by a dash line since the message itself can span multiple lines, making it
-/// hard to tell where it starts without one.
+/// quotes, prints `Raw message` and `Cleaned message` separately so the difference is
+/// visible directly in the log rather than only inferable from the final message. Each
+/// label sits on its own dash-padded header line (see [`padded_header`]) since the
+/// message itself can span multiple lines, making it hard to tell where it starts
+/// without one.
 pub fn raw_and_cleaned_message(
     out: &mut (impl Write + ?Sized),
     raw: &str,
     cleaned: &str,
 ) -> io::Result<()> {
     if raw == cleaned {
-        writeln!(out, "{DASH_LINE}\nRaw/Cleaned message:\n{raw}")
+        writeln!(out, "{}\n{raw}", padded_header("Raw/Cleaned message"))
     } else {
         writeln!(
             out,
-            "{DASH_LINE}\nRaw message:\n{raw}\n{DASH_LINE}\nCleaned message:\n{cleaned}"
+            "{}\n{raw}\n{}\n{cleaned}",
+            padded_header("Raw message"),
+            padded_header("Cleaned message")
         )
     }
+}
+
+/// Centers `label` in a `-`-padded 40-column header line, e.g. `------ Raw message
+/// ------`, so the label and its surrounding divider read as one line instead of two.
+/// `pub(crate)` so callers (e.g. `generation.rs`'s tests) can build exact expected
+/// strings instead of guessing at dash counts.
+pub(crate) fn padded_header(label: &str) -> String {
+    format!("{:-^40}", format!(" {label} "))
 }
 
 const DASH_LINE: &str = "----------------------------------------";
@@ -85,8 +96,8 @@ pub fn generated_empty_message(
     )
 }
 
-/// Preceded by a dash line to set the final message off from the `Raw message:`/
-/// `Cleaned message:` dump right above it.
+/// Preceded by a dash line to set the final message off from the `Raw message`/
+/// `Cleaned message` dump right above it.
 pub fn commit_message_generated(
     out: &mut (impl Write + ?Sized),
     name: &str,
@@ -127,7 +138,8 @@ pub fn section_break(out: &mut (impl Write + ?Sized)) -> io::Result<()> {
     writeln!(out, "{EQUALS_LINE}")
 }
 
-const EQUALS_LINE: &str = "========================================";
+const EQUALS_LINE: &str =
+    "================================================================================";
 
 /// Logged once the tool picker's `fzf` front-end couldn't run (not on `$PATH`, no
 /// controlling terminal, or any other failure — see `fzf::FzfOutcome::Unavailable`)
@@ -190,7 +202,7 @@ mod tests {
     fn raw_and_cleaned_message_collapses_to_one_dump_when_identical() {
         assert_eq!(
             captured(|w| raw_and_cleaned_message(w, "feat: add x", "feat: add x")),
-            format!("{DASH_LINE}\nRaw/Cleaned message:\nfeat: add x\n")
+            format!("{}\nfeat: add x\n", padded_header("Raw/Cleaned message"))
         );
     }
 
@@ -199,9 +211,20 @@ mod tests {
         assert_eq!(
             captured(|w| raw_and_cleaned_message(w, "```\nfeat: add x\n```", "feat: add x")),
             format!(
-                "{DASH_LINE}\nRaw message:\n```\nfeat: add x\n```\n{DASH_LINE}\nCleaned message:\nfeat: add x\n"
+                "{}\n```\nfeat: add x\n```\n{}\nfeat: add x\n",
+                padded_header("Raw message"),
+                padded_header("Cleaned message")
             )
         );
+    }
+
+    #[test]
+    fn padded_header_centers_the_label_with_dashes_to_a_width_of_40() {
+        let header = padded_header("Raw message");
+        assert_eq!(header.len(), 40);
+        assert!(header.contains(" Raw message "));
+        assert!(header.starts_with('-'));
+        assert!(header.ends_with('-'));
     }
 
     #[test]

@@ -136,15 +136,26 @@ pub fn interpret_index(line: &str, count: usize) -> PickerInput {
     }
 }
 
+/// Strips `config::listing::lines`' trailing `  (default)` marker from a display line,
+/// if present. [`prompt_index`]'s own prompt line already states the default index
+/// directly (`Enter an index [default N]: `), making the per-entry marker redundant
+/// there — even though `--list-tools` and the fzf front-end (`fzf::Fzf`), which have no
+/// such prompt line of their own, still show it (see `config::listing::lines`).
+fn without_default_marker(line: &str) -> &str {
+    line.strip_suffix("  (default)").unwrap_or(line)
+}
+
 /// Default mode's tool picker: an arbitrary-length numbered menu. Prints each of `lines`
-/// as `N) <line>` (the `(default)` marker, if any, is already baked into the relevant
-/// line by `config::listing::lines` — this function adds no marker of its own), then a
-/// `Select a tool [0-N]: ` prompt with no trailing newline (flushed so it's visible
-/// before `reader` blocks), and reprints the whole menu on any invalid input — except a
-/// blank or all-whitespace line, which selects `default` immediately when it's `Some`.
-/// True EOF is [`PickerError::Cancelled`] (unaffected by `default`: it signals a closed/
-/// non-interactive stdin rather than the user pressing Enter), a non-EOF read failure is
-/// [`PickerError::Io`]. `lines` must be non-empty.
+/// as `N) <line>`, with any trailing `(default)` marker `config::listing::lines` baked
+/// in stripped back off (see [`without_default_marker`] — this function's own prompt
+/// line states the default index instead), then `Enter an index [default N]: ` (or,
+/// when `default` is `None` — nothing is enabled — `Enter an index [0-N]: `) with no
+/// trailing newline (flushed so it's visible before `reader` blocks), and reprints the
+/// whole menu on any invalid input — except a blank or all-whitespace line, which
+/// selects `default` immediately when it's `Some`. True EOF is [`PickerError::Cancelled`]
+/// (unaffected by `default`: it signals a closed/non-interactive stdin rather than the
+/// user pressing Enter), a non-EOF read failure is [`PickerError::Io`]. `lines` must be
+/// non-empty.
 ///
 /// # Errors
 /// [`PickerError::Cancelled`] on EOF without ever selecting a valid index;
@@ -158,9 +169,13 @@ pub fn prompt_index(
     let last = lines.len().saturating_sub(1);
     loop {
         for (index, line) in lines.iter().enumerate() {
-            let _ = writeln!(writer, "{index}) {line}");
+            let _ = writeln!(writer, "{index}) {}", without_default_marker(line));
         }
-        let _ = write!(writer, "Select a tool [0-{last}]: ");
+        let prompt = match default {
+            Some(d) => format!("Enter an index [default {d}]: "),
+            None => format!("Enter an index [0-{last}]: "),
+        };
+        let _ = write!(writer, "{prompt}");
         let _ = writer.flush();
 
         let mut line = String::new();
@@ -568,7 +583,30 @@ mod tests {
         let picked = prompt_index(&mut input, &mut output, &lines, None).unwrap();
         assert_eq!(picked, 1);
         let printed = String::from_utf8(output).unwrap();
-        assert_eq!(printed, "0) a\n1) b\n2) c\nSelect a tool [0-2]: ");
+        assert_eq!(printed, "0) a\n1) b\n2) c\nEnter an index [0-2]: ");
+    }
+
+    #[test]
+    fn prompt_index_states_the_default_in_the_prompt_and_strips_its_marker_from_the_line() {
+        let lines = vec![
+            "a  agent_cli  [enabled]".to_string(),
+            "b  agent_cli  [enabled]  (default)".to_string(),
+        ];
+        let mut input = Cursor::new(b"0\n".to_vec());
+        let mut output = Vec::new();
+        prompt_index(&mut input, &mut output, &lines, Some(1)).unwrap();
+        let printed = String::from_utf8(output).unwrap();
+        assert!(!printed.contains("(default)"));
+        assert!(printed.contains("Enter an index [default 1]: "));
+    }
+
+    #[test]
+    fn without_default_marker_strips_only_a_genuine_trailing_marker() {
+        assert_eq!(
+            without_default_marker("a  [enabled]  (default)"),
+            "a  [enabled]"
+        );
+        assert_eq!(without_default_marker("a  [enabled]"), "a  [enabled]");
     }
 
     #[test]

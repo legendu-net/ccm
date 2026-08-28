@@ -128,7 +128,7 @@ fn empty_tool_flag_forces_the_picker_onto_a_disabled_entry_under_dry_run() {
         .assert()
         .code(0)
         .stdout("feat: from b") // trimmed of the "echo"-appended trailing newline
-        .stderr(predicate::str::contains("Select a tool"));
+        .stderr(predicate::str::contains("Enter an index"));
 }
 
 /// A fake `$EDITOR` that copies the temp file's pre-populated content (the generated
@@ -166,7 +166,7 @@ fn no_tool_flag_picker_selects_the_second_entry() {
         .write_stdin("1\ne\n")
         .assert()
         .code(0)
-        .stderr(predicate::str::contains("Select a tool"));
+        .stderr(predicate::str::contains("Enter an index"));
     let captured = std::fs::read_to_string(&marker).unwrap();
     assert!(captured.starts_with("feat: from b"));
 }
@@ -194,7 +194,7 @@ fn empty_tool_flag_forces_the_picker_onto_a_disabled_entry_in_default_mode() {
         .write_stdin("1\ne\n")
         .assert()
         .code(0)
-        .stderr(predicate::str::contains("Select a tool"));
+        .stderr(predicate::str::contains("Enter an index"));
     let captured = std::fs::read_to_string(&marker).unwrap();
     assert!(captured.starts_with("feat: from b"));
 }
@@ -226,7 +226,9 @@ fn picker_reprompts_on_invalid_input_before_succeeding() {
 #[test]
 fn picker_blank_input_selects_the_default_tool() {
     // "a" is the first-enabled/default entry; a blank line at the prompt selects it
-    // without the user typing "0".
+    // without the user typing "0". The prompt states the default index directly
+    // ("Enter an index [default 0]: ") rather than marking the entry's own line, so
+    // that's what this test looks for.
     let fx = Fixture::new();
     fx.init_git();
     write_two_enabled_tool_config(&fx);
@@ -242,7 +244,7 @@ fn picker_blank_input_selects_the_default_tool() {
         .write_stdin("\ne\n")
         .assert()
         .code(0)
-        .stderr(predicate::str::contains("(default)"));
+        .stderr(predicate::str::contains("Enter an index [default 0]"));
     let captured = std::fs::read_to_string(&marker).unwrap();
     assert!(captured.starts_with("feat: from a"));
 }

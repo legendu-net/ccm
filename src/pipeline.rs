@@ -638,7 +638,7 @@ mod tests {
         let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
         assert_eq!(err.exit_code().as_u8(), 14);
         let printed = String::from_utf8(stderr).unwrap();
-        assert!(printed.contains("Select a tool"));
+        assert!(printed.contains("Enter an index"));
     }
 
     #[test]
@@ -706,7 +706,7 @@ mod tests {
         let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
         assert_eq!(err.exit_code().as_u8(), 8);
         let printed = String::from_utf8(stderr).unwrap();
-        assert!(printed.contains("Select a tool"));
+        assert!(printed.contains("Enter an index"));
     }
 
     #[test]
@@ -741,7 +741,7 @@ mod tests {
         let err = run(&cli, &env, &mut stdin, &mut out, &mut stderr).unwrap_err();
         assert_eq!(err.exit_code().as_u8(), 14);
         let printed = String::from_utf8(stderr).unwrap();
-        assert!(printed.contains("Select a tool"));
+        assert!(printed.contains("Enter an index"));
     }
 
     // ---- fzf front-end gating (fzf itself is never actually spawned here — these
@@ -902,7 +902,7 @@ mod tests {
         assert_eq!(err.exit_code().as_u8(), 8);
         let printed = String::from_utf8(stderr).unwrap();
         assert!(printed.contains("fzf unavailable"));
-        assert!(printed.contains("Select a tool"));
+        assert!(printed.contains("Enter an index"));
     }
 
     #[test]
@@ -996,7 +996,7 @@ mod tests {
             run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
         assert_eq!(err.exit_code().as_u8(), 8);
         let printed = String::from_utf8(stderr).unwrap();
-        assert!(printed.contains("Select a tool"));
+        assert!(printed.contains("Enter an index"));
         assert!(!printed.contains("fzf unavailable"));
     }
 

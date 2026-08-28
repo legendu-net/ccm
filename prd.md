@@ -1093,15 +1093,28 @@ part of the run and none on `--dry-run` without `--tool ''` (which never reaches
 tool picker at all).
 
 One behavior is specific to the numbered prompt and doesn't carry over: a blank line
-(Enter with no index typed) selects the entry marked `(default)` in the listing — the
-same one `select_first_enabled` would pick automatically when there's exactly one enabled
-entry — without needing to type its number; when nothing is enabled there is no
-`(default)` entry, so a blank line simply re-prompts there too, the same as any other
-invalid input; EOF is a separate signal from a blank line and is unaffected by the
-default — it still cancels even when one is available. `fzf` has no equivalent of a blank
-line: Enter always confirms whichever candidate is highlighted, and the initial highlight
-is the first entry in `api.yaml` order (not necessarily the `(default)`-marked one),
-though that marker is still visible in the list either way.
+(Enter with no index typed) selects the same entry `select_first_enabled` would pick
+automatically when there's exactly one enabled entry, without needing to type its
+number. Rather than repeating the `(default)` marker `--list-tools`/`fzf` show on the
+entry's own line — redundant here, since the prompt already names the index directly —
+the numbered prompt strips that marker from its own copy of each line and instead states
+the default index in its own prompt text:
+
+```
+0) a  agent_cli   [enabled]
+1) b  agent_cli   [enabled]
+Enter an index [default 0]:
+```
+
+When nothing is enabled there is no default index, so the prompt falls back to stating
+the valid range instead (`Enter an index [0-1]: `), and a blank line simply re-prompts,
+the same as any other invalid input; EOF is a separate signal from a blank line and is
+unaffected by the default either way — it still cancels even when one is available.
+`fzf` has no equivalent of a blank line: Enter always confirms whichever candidate is
+highlighted, and the initial highlight is the first entry in `api.yaml` order (not
+necessarily the `(default)`-marked one) — its own list still shows the `(default)`
+marker on the entry's line, since `fzf` has no separate prompt-line to state it in
+instead.
 
 Either way, the name-uniqueness and prompt-reference validation above still runs first,
 unconditionally — a `--tool` run or a tool-picker prompt is never reached with an

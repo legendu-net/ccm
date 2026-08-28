@@ -180,7 +180,7 @@ fn tool_picker_prompt_is_on_stderr_and_never_leaks_to_stdout() {
         .assert()
         .code(0)
         .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("Select a tool"));
+        .stderr(predicate::str::contains("Enter an index"));
 }
 
 #[test]

@@ -1235,8 +1235,9 @@ mod tests {
 
     // ---- interactive file picker gating (prd.md "Diff scope resolution") — whether
     // the "restrict the diff to specific files?" prompt is even reached; its own
-    // behavior (fzf outcomes, the collapse-to-All rule, the numbered fallback) is
-    // covered directly in fileselect.rs's own tests. All of these leave the working
+    // behavior (fzf outcomes, the "mark everything still pins an explicit list" rule,
+    // the numbered fallback) is covered directly in fileselect.rs's own tests. All of
+    // these leave the working
     // copy untouched (nothing staged/changed), and drive stdin with EOF whenever the
     // prompt is expected to be reached — deterministic and network-free: reaching the
     // prompt surfaces as exit 14 (cancelled on EOF, same as any other picker), never

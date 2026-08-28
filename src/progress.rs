@@ -153,12 +153,13 @@ pub fn fzf_unavailable(out: &mut (impl Write + ?Sized), reason: &str) -> io::Res
 }
 
 /// Logged once the interactive file picker (`fileselect.rs`, prd.md "Diff scope
-/// resolution") resolves to a proper subset of the working copy, so the log states
-/// what scope the diff/commit that follows actually covers — the same spirit as
-/// `Working-copy files enumerated by:` above, but naming the *chosen* files rather
-/// than every changed one. Not logged when every candidate was picked (that collapses
-/// to `Selection::All`, same as declining the prompt) or when the prompt was declined
-/// outright.
+/// resolution") resolves to an explicit, marked scope — a proper subset of the working
+/// copy, or every candidate marked (which is still pinned as an explicit list, not
+/// collapsed to `Selection::All` — see `fileselect.rs`) — so the log states what scope
+/// the diff/commit that follows actually covers, the same spirit as `Working-copy
+/// files enumerated by:` above but naming the *chosen* files rather than every changed
+/// one. Not logged when the prompt was declined, or skipped outright (at most one
+/// changed file).
 pub fn files_selected(out: &mut (impl Write + ?Sized), files: &[String]) -> io::Result<()> {
     writeln!(
         out,

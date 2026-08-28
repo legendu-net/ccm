@@ -29,16 +29,20 @@ use std::path::Path;
 ///   already mean the same thing then, so there's nothing worth asking about. Zero
 ///   changed files still surfaces as the usual "nothing to diff" exit 8 once
 ///   `diff::generate` runs on the resulting `Selection::All`.
-/// - Two or more changed files, then No (the default, a bare Enter) -> also
-///   [`Selection::All`].
-/// - Two or more changed files, then Yes, then every candidate marked -> also
-///   [`Selection::All`]: this collapse keeps "select everything" indistinguishable
-///   from declining, rather than making `files` non-empty for no real restriction —
-///   which would otherwise flip the jj commit-command picker from `[D]escribe` to
-///   `[S]plit` (see `commit.rs`) and `jj split` the entire working copy for nothing.
-/// - Two or more changed files, then Yes, then a proper subset marked ->
-///   [`Selection::Explicit`] with those paths, in candidate (first-seen enumeration)
-///   order.
+/// - Two or more changed files, then No (the default, a bare Enter) -> [`Selection::All`].
+/// - Two or more changed files, then Yes, then any marked subset (including every
+///   candidate) -> [`Selection::Explicit`] with exactly those paths, in candidate
+///   (first-seen enumeration) order. Marking every candidate deliberately does *not*
+///   collapse to [`Selection::All`]: the two aren't equivalent once time is allowed to
+///   pass between enumeration and the eventual `jj diff`/`jj commit` invocations (an
+///   interactive picker can leave the working copy open for arbitrarily long) —
+///   `Selection::All` re-resolves to whatever the working copy *currently* contains at
+///   each of those later points, which could by then include a file that was never
+///   enumerated and that the user never saw or chose, where pinning the exact
+///   enumerated paths cannot. The tradeoff is that marking every candidate still flips
+///   the jj commit-command picker from `[D]escribe` to `[S]plit` (see `commit.rs`),
+///   even though nothing was excluded — the accepted cost of not silently including a
+///   file the user was never shown.
 ///
 /// `fzf_enabled` is `!fzf::disabled_by_env(...)` — the caller (`pipeline.rs`) only
 /// calls this function at all once its own `env.stdin_is_terminal()` guard has
@@ -87,10 +91,8 @@ pub fn resolve_interactively(
     };
     let _ = progress::section_break(stderr);
 
-    if indices.len() == targets.len() {
-        // Every candidate marked -> equivalent to declining (see this fn's doc).
-        return Ok(Selection::All);
-    }
+    // Pinned as `Explicit` even when every candidate was marked — never collapsed
+    // back to `Selection::All` (see this fn's doc for why).
     let selected: Vec<String> = indices.into_iter().map(|i| targets[i].clone()).collect();
     let _ = progress::files_selected(stderr, &selected);
     Ok(Selection::Explicit(selected))
@@ -257,7 +259,12 @@ mod tests {
     }
 
     #[test]
-    fn fzf_selecting_every_candidate_collapses_to_all() {
+    fn fzf_selecting_every_candidate_pins_the_explicit_list_rather_than_collapsing() {
+        // Marking every candidate must NOT collapse to `Selection::All`: a file that
+        // starts changing after enumeration (but before the eventual `jj diff`/`jj
+        // commit` calls) would otherwise be silently swept into an unrestricted
+        // `Selection::All`, even though the user never saw or chose it. Pinning the
+        // exact enumerated set protects against that.
         let (_tmp, repo) = jj_repo();
         std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
         std::fs::write(repo.join("b.rs"), "world\n").unwrap();
@@ -267,7 +274,10 @@ mod tests {
         let selection =
             resolve_interactively(&repo, &mut stdin, &mut stderr, &fzf_picker, true, false)
                 .unwrap();
-        assert_eq!(selection, Selection::All);
+        assert_eq!(
+            selection,
+            Selection::Explicit(vec!["a.rs".to_string(), "b.rs".to_string()])
+        );
     }
 
     #[test]
@@ -330,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn numbered_prompt_blank_line_selects_all_which_collapses() {
+    fn numbered_prompt_blank_line_selects_every_candidate_explicitly() {
         let (_tmp, repo) = jj_repo();
         std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
         std::fs::write(repo.join("b.rs"), "world\n").unwrap();
@@ -339,6 +349,9 @@ mod tests {
         let selection =
             resolve_interactively(&repo, &mut stdin, &mut stderr, &PanickingFzf, false, false)
                 .unwrap();
-        assert_eq!(selection, Selection::All);
+        assert_eq!(
+            selection,
+            Selection::Explicit(vec!["a.rs".to_string(), "b.rs".to_string()])
+        );
     }
 }

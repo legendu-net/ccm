@@ -533,16 +533,22 @@ front-ends allow marking any number of candidates before confirming — `fzf` vi
 `--multi` (Tab to mark), the numbered fallback via a comma- or whitespace-separated list
 of indices, with a blank line meaning every candidate.
 
-If every enumerated file ends up marked, that resolves to the whole working copy —
-identical to answering `No` — rather than to a "restricted" scope that happens to be
-everything; this keeps the
-degenerate "select everything" case from making the jj commit-command picker below
-believe a real restriction was made (which would otherwise offer `jj split` instead of
-`jj describe` — see "jj commit commands" — over the entire working copy for no reason).
-Otherwise, the marked subset becomes the file scope exactly as a resolved
-`--include` would: passed as explicit file arguments to the final
+The marked subset — even when it's every enumerated candidate — becomes the file scope
+exactly as a resolved `--include` would: passed as explicit file arguments to the final
 `jj --no-pager diff --color=never <files...>` invocation, and threaded through unchanged
-to the jj commit-command picker afterward.
+to the jj commit-command picker afterward, which then offers `jj split` instead of `jj
+describe` (see "jj commit commands"). Marking every candidate is deliberately *not*
+treated the same as declining the prompt (an unrestricted `Selection::All`), even though
+the file set is the same at the moment of marking: `Selection::All` re-resolves to
+whatever the working copy *currently* contains at each of the (separate, later) `jj
+diff`/`jj commit` invocations, whereas the marked list is fixed at the moment the picker
+closes. Since an interactive picker can leave the working copy open for arbitrarily
+long, a file that starts changing after enumeration — one the user was never shown and
+never chose — would otherwise be silently swept into the diff and the commit; pinning
+the exact enumerated paths instead means such a file is simply never included, no matter
+how long the run takes to finish. The cost is that "select everything" still triggers
+`jj split` rather than `jj describe` even though nothing was actually excluded — accepted
+as the price of not silently including an unseen file.
 
 Default behavior (no `--dry-run`): compute the diff, generate the commit message,
 open it in `$EDITOR` — always, even if generation came back blank — and after the user
@@ -1245,8 +1251,10 @@ later stages are never reached:
    paths, where an unmatched path is a usage error (exit code 2, jj only — not
    applicable to the picker, which only ever offers already-enumerated paths) or an
    empty result is exit code 8 (nothing changed to restrict — not applicable to the
-   picker either, since selecting nothing isn't offered as a distinct outcome from
-   declining, or from marking every candidate — see "Interactive file selection"); then
+   picker either, since neither of its front-ends can resolve to zero marked files: a
+   blank line/Enter on the numbered fallback selects every candidate rather than none,
+   and `fzf` maps confirming with nothing marked to a cancellation, not an empty
+   selection — see "Interactive file selection"); then
    running the final `git diff`/`jj diff` invocation (exit code 7 as well) and
    confirming the result is non-empty (exit code 8).
 7. **Generation** — API key resolution (exit code 9), the tool/API call itself (exit

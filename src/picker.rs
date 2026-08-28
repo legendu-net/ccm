@@ -237,10 +237,14 @@ pub fn interpret_action(byte: u8, allow_accept: bool) -> Option<ReviewAction> {
 }
 
 fn print_action_menu(writer: &mut (impl Write + ?Sized), allow_accept: bool) {
+    let _ = writeln!(writer, "What to do with the generated message?");
     if allow_accept {
-        let _ = write!(writer, "[R]egenerate  [E]dit  [Space/Enter/A]ccept: ");
+        let _ = write!(
+            writer,
+            "[R]egenerate    [E]dit    [Space/Enter/A]ccept as is: "
+        );
     } else {
-        let _ = write!(writer, "[R]egenerate  [Space/Enter] edit: ");
+        let _ = write!(writer, "[R]egenerate    [Space/Enter] edit: ");
     }
     let _ = writer.flush();
 }
@@ -327,12 +331,13 @@ fn read_key(reader: &mut (impl BufRead + ?Sized), raw: bool) -> Result<u8, Picke
 }
 
 /// Runs the message review prompt (prd.md "Message review prompt") to a selection:
-/// prints `[R]egenerate  [E]dit  [Space/Enter/A]ccept: ` (or, when `allow_accept` is
-/// `false` — the generated message is blank — `[R]egenerate  [Space/Enter] edit: `),
-/// reads a single key via `read_key`, and repeats on any input [`interpret_action`]
-/// doesn't recognize. See `read_key` for the raw-vs-line-mode and EOF/Ctrl-D behavior.
-/// A newline is written after a valid selection, since raw mode echoes nothing back to
-/// the terminal on its own.
+/// prints a `What to do with the generated message?` heading followed by
+/// `[R]egenerate    [E]dit    [Space/Enter/A]ccept as is: ` (or, when `allow_accept` is
+/// `false` — the generated message is blank — `[R]egenerate    [Space/Enter] edit: `),
+/// reads a single key via `read_key`, and repeats (heading included) on any input
+/// [`interpret_action`] doesn't recognize. See `read_key` for the raw-vs-line-mode and
+/// EOF/Ctrl-D behavior. A newline is written after a valid selection, since raw mode
+/// echoes nothing back to the terminal on its own.
 ///
 /// # Errors
 /// [`PickerError::Cancelled`] on EOF or Ctrl-D before a valid selection;
@@ -760,7 +765,8 @@ mod tests {
         let mut output = Vec::new();
         prompt_action(&mut input, &mut output, true, false).unwrap();
         let printed = String::from_utf8(output).unwrap();
-        assert!(printed.contains("[R]egenerate  [E]dit  [Space/Enter/A]ccept: "));
+        assert!(printed.contains("What to do with the generated message?"));
+        assert!(printed.contains("[R]egenerate    [E]dit    [Space/Enter/A]ccept as is: "));
     }
 
     #[test]
@@ -769,7 +775,8 @@ mod tests {
         let mut output = Vec::new();
         prompt_action(&mut input, &mut output, false, false).unwrap();
         let printed = String::from_utf8(output).unwrap();
-        assert!(printed.contains("[R]egenerate  [Space/Enter] edit: "));
+        assert!(printed.contains("What to do with the generated message?"));
+        assert!(printed.contains("[R]egenerate    [Space/Enter] edit: "));
         assert!(!printed.contains("accept"));
     }
 

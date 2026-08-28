@@ -630,13 +630,15 @@ single keypress, and a poor one can be thrown away and re-requested without leav
 `ccm` at all.
 
 ```
-[R]egenerate  [E]dit  [Space/Enter/A]ccept:
+What to do with the generated message?
+[R]egenerate    [E]dit    [Space/Enter/A]ccept as is:
 ```
 
 or, when generation came back blank (nothing worth accepting yet):
 
 ```
-[R]egenerate  [Space/Enter] edit:
+What to do with the generated message?
+[R]egenerate    [Space/Enter] edit:
 ```
 
 - **Regenerate** (`r`/`R`) re-runs stage 7 (message generation) against the same

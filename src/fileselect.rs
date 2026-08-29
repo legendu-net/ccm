@@ -62,7 +62,7 @@ pub fn resolve_interactively(
     fzf_enabled: bool,
     raw: bool,
 ) -> Result<Selection, CcmError> {
-    let entries = diff::enumerate_jj(cwd, stderr)?;
+    let entries = diff::enumerate_jj(cwd)?;
     let targets = dedup_targets(&entries);
     if targets.len() <= 1 {
         return Ok(Selection::All);

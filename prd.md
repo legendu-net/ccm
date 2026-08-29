@@ -396,11 +396,11 @@ parsed programmatically too. This enumeration call is a real subprocess invocati
 its own right, distinct from the final `jj diff <files...>` call below, and can fail the
 same way a diff invocation can — e.g. `jj` not found, or erroring inside a jj repository
 for some other reason — which is reported the same way: exit code 7 (see Error
-Handling), and via its own progress lines, `Enumerating working-copy files using:
-<command>` before it runs and `Working-copy files enumerated by: <command>` once it
-succeeds (see Progress logging), separate from the `Generating diff using: <command>`
-line for the final synthesized command below. `jj diff --summary` reports paths relative to the current
-working directory, the same basis `--include`/`--exclude` are given in (see Flags above).
+Handling). It is not itself progress-logged (it runs fast enough, and often enough, that
+a dedicated pair of lines would just be noise) — only the `Generating diff using:
+<command>` line for the final synthesized command below (see Progress logging). `jj diff
+--summary` reports paths relative to the current working directory, the same basis
+`--include`/`--exclude` are given in (see Flags above).
 
 Known limitation, left unaddressed: the enumeration call and the final `jj diff
 <files...>` invocation below are two separate subprocess calls, so the working copy can
@@ -506,8 +506,8 @@ accepted (see the usage-error note above).
 
 In default mode (not `--dry-run`), for a jj repository, when neither `--include` nor
 `--exclude` was given, `ccm` enumerates the working copy the same way resolving
-`--include`/`--exclude` does (`jj diff --summary`, see above — the same progress lines
-apply) *before* deciding whether to prompt at all. With at most one changed file, there
+`--include`/`--exclude` does (`jj diff --summary`, see above — not itself
+progress-logged) *before* deciding whether to prompt at all. With at most one changed file, there
 is nothing meaningfully different between "the whole working copy" and "a chosen
 subset" — so `ccm` skips straight to the whole working copy, exactly as if this feature
 didn't exist, no prompt shown. (Zero changed files still surfaces as the usual "nothing
@@ -806,11 +806,10 @@ Every line below is written to stderr, never stdout, regardless of `--dry-run` �
 is reserved solely for the generated message under `--dry-run`, so progress output
 never ends up mixed into it even when stdout is piped/captured. Roughly, in order:
 
-- `Enumerating working-copy files using: <command>` — jj only, before running the `jj
-    diff --summary` enumeration call, only when `--include` or `--exclude` was given (see
-    "Diff scope resolution").
-- `Working-copy files enumerated by: <command>` — once it succeeds.
 - `Generating diff using: <command>` — before running the `git diff`/`jj diff` invocation.
+    For jj with `--include`/`--exclude`, the `jj diff --summary` enumeration call used to
+    resolve the scope (see "Diff scope resolution") runs first but is not itself
+    progress-logged.
 - `Generating commit message using <name> (<model>)…` — before calling the selected
     `api.yaml` entry.
 - `Generated empty message using <name> (<model>)` — if the tool/API's response, after

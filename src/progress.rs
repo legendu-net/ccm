@@ -21,20 +21,6 @@
 
 use std::io::{self, Write};
 
-pub fn enumerating_working_copy_files(
-    out: &mut (impl Write + ?Sized),
-    command: &str,
-) -> io::Result<()> {
-    writeln!(out, "Enumerating working-copy files using: {command}")
-}
-
-pub fn working_copy_files_enumerated(
-    out: &mut (impl Write + ?Sized),
-    command: &str,
-) -> io::Result<()> {
-    writeln!(out, "Working-copy files enumerated by: {command}")
-}
-
 pub fn generating_diff(out: &mut (impl Write + ?Sized), command: &str) -> io::Result<()> {
     writeln!(out, "Generating diff using: {command}")
 }
@@ -156,10 +142,8 @@ pub fn fzf_unavailable(out: &mut (impl Write + ?Sized), reason: &str) -> io::Res
 /// resolution") resolves to an explicit, marked scope — a proper subset of the working
 /// copy, or every candidate marked (which is still pinned as an explicit list, not
 /// collapsed to `Selection::All` — see `fileselect.rs`) — so the log states what scope
-/// the diff/commit that follows actually covers, the same spirit as `Working-copy
-/// files enumerated by:` above but naming the *chosen* files rather than every changed
-/// one. Not logged when the prompt was declined, or skipped outright (at most one
-/// changed file).
+/// the diff/commit that follows actually covers. Not logged when the prompt was
+/// declined, or skipped outright (at most one changed file).
 pub fn files_selected(out: &mut (impl Write + ?Sized), files: &[String]) -> io::Result<()> {
     writeln!(
         out,
@@ -177,18 +161,6 @@ mod tests {
         let mut buf = Vec::new();
         f(&mut buf).unwrap();
         String::from_utf8(buf).unwrap()
-    }
-
-    #[test]
-    fn enumeration_lines_match_spec_wording() {
-        assert_eq!(
-            captured(|w| enumerating_working_copy_files(w, "jj diff --summary")),
-            "Enumerating working-copy files using: jj diff --summary\n"
-        );
-        assert_eq!(
-            captured(|w| working_copy_files_enumerated(w, "jj diff --summary")),
-            "Working-copy files enumerated by: jj diff --summary\n"
-        );
     }
 
     #[test]

@@ -78,7 +78,7 @@ fn generate_jj(
     let files = match selection {
         scope::Selection::All => vec![],
         scope::Selection::Include(_) | scope::Selection::Exclude(_) => {
-            let entries = enumerate_jj(cwd, stderr)?;
+            let entries = enumerate_jj(cwd)?;
             scope::resolve_scope(&entries, selection)
                 .map_err(|err| UsageError::UnmatchedPath { entry: err.entry })?
         }
@@ -100,9 +100,12 @@ fn generate_jj(
         return Err(DiffError::Empty.into());
     }
 
-    // A section break separates the enumeration group (jj_include/exclude only) from
-    // the diff-generation group about to start; for Selection::All there was no
-    // enumeration group above, so no separator is needed here either.
+    // A section break separates whatever progress lines led up to this point — the
+    // interactive file picker's own trailing output (`fileselect.rs`) for
+    // `Selection::Explicit`, or nothing at all for `Include`/`Exclude` (the `jj diff
+    // --summary` enumeration call above isn't itself progress-logged) — from the
+    // diff-generation group about to start. Not needed for `Selection::All`, which has
+    // no lead-up of its own.
     if !matches!(selection, scope::Selection::All) {
         let _ = progress::section_break(stderr);
     }
@@ -127,21 +130,14 @@ fn generate_jj(
 }
 
 /// `pub(crate)` (rather than private) so `fileselect.rs` can reuse the same
-/// enumeration call — progress lines included — to build the interactive file
-/// picker's candidate list, instead of duplicating it.
-pub(crate) fn enumerate_jj(
-    cwd: &Path,
-    stderr: &mut dyn std::io::Write,
-) -> Result<Vec<summary::SummaryEntry>, CcmError> {
+/// enumeration call to build the interactive file picker's candidate list, instead of
+/// duplicating it.
+pub(crate) fn enumerate_jj(cwd: &Path) -> Result<Vec<summary::SummaryEntry>, CcmError> {
     let args = argv::jj_summary_args();
-    let command = argv::render_command("jj", &args);
-    let _ = progress::enumerating_working_copy_files(stderr, &command);
-
     let captured = exec::run_simple("jj", args, cwd).map_err(DiffError::Enumeration)?;
     if !captured.success {
         return Err(DiffError::Enumeration(stderr_text(captured)).into());
     }
-    let _ = progress::working_copy_files_enumerated(stderr, &command);
 
     let text = exec::owned_utf8_lossy(captured.stdout);
     summary::parse_summary(&text).map_err(|err| DiffError::Enumeration(err.to_string()).into())
@@ -291,12 +287,10 @@ mod tests {
         assert_eq!(result.files, vec!["a.txt".to_string()]);
         assert!(result.diff.contains("a.txt"));
         assert!(!result.diff.contains("b.txt"));
-        let logged = String::from_utf8(stderr).unwrap();
-        assert!(!logged.contains("Enumerating working-copy files using:"));
     }
 
     #[test]
-    fn jj_include_resolves_scope_and_enumerates_first() {
+    fn jj_include_resolves_scope_and_diffs_only_matched_files() {
         let (_tmp, repo) = jj_repo();
         std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
         std::fs::write(repo.join("b.txt"), "world\n").unwrap();
@@ -307,9 +301,6 @@ mod tests {
         assert_eq!(result.files, vec!["a.txt".to_string()]);
         assert!(result.diff.contains("a.txt"));
         assert!(!result.diff.contains("b.txt"));
-        let logged = String::from_utf8(stderr).unwrap();
-        assert!(logged.contains("Enumerating working-copy files using:"));
-        assert!(logged.contains("Working-copy files enumerated by:"));
     }
 
     #[test]

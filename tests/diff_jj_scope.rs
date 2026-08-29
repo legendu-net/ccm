@@ -37,7 +37,7 @@ fn changes_with_no_scope_flag_diffs_the_whole_working_copy() {
 }
 
 #[test]
-fn include_restricts_the_scope_and_enumerates_first() {
+fn include_restricts_the_scope_to_the_matched_file() {
     let fx = Fixture::new();
     fx.init_jj();
     fx.write_valid_config();
@@ -49,9 +49,8 @@ fn include_restricts_the_scope_and_enumerates_first() {
         .assert()
         .code(0)
         .stderr(
-            predicate::str::contains("Enumerating working-copy files using:").and(
-                predicate::str::contains("Working-copy files enumerated by:"),
-            ),
+            predicate::str::contains("Generating diff using:")
+                .and(predicate::str::contains("a.txt")),
         );
 }
 

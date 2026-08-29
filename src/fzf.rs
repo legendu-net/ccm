@@ -30,11 +30,11 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 
-/// How an [`select`] attempt ended.
+/// How a [`Fzf::select`] attempt ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FzfOutcome {
     /// The user picked the candidate at this index into the `lines` passed to
-    /// [`select`].
+    /// [`Fzf::select`].
     Selected(usize),
     /// The user explicitly aborted (Esc/Ctrl-C — `fzf` exit 130) or confirmed with
     /// nothing matched (`fzf` exit 1). The fuzzy-picker equivalent of the numbered
@@ -90,7 +90,7 @@ pub fn disabled_by_env(ccm_fuzzy: Option<&str>) -> bool {
     ccm_fuzzy == Some("0")
 }
 
-/// The real, production front-end: shells out via [`select`].
+/// The real, production front-end: shells out via [`Fzf::select`].
 pub struct RealFzf;
 
 impl Fzf for RealFzf {
@@ -109,7 +109,7 @@ impl Fzf for RealFzf {
 /// matching every other interactive picker in this codebase (a human thinking is not a
 /// hung process).
 #[must_use]
-pub fn select(cwd: &Path, lines: &[String]) -> FzfOutcome {
+fn select(cwd: &Path, lines: &[String]) -> FzfOutcome {
     let stdin_bytes = format!("{}\n", lines.join("\n")).into_bytes();
     interpret(spawn(cwd, &build_args(), stdin_bytes), lines)
 }
@@ -127,7 +127,7 @@ fn build_args() -> Vec<String> {
 /// `jj diff --summary` entries — see `fileselect.rs`) in multi-select mode (`--multi`,
 /// Tab to mark) with a live per-file diff preview, and reports what happened.
 #[must_use]
-pub fn select_files(cwd: &Path, lines: &[String]) -> FzfMultiOutcome {
+fn select_files(cwd: &Path, lines: &[String]) -> FzfMultiOutcome {
     let stdin_bytes = format!("{}\n", lines.join("\n")).into_bytes();
     interpret_multi(spawn(cwd, &build_files_args(), stdin_bytes), lines)
 }
@@ -384,15 +384,19 @@ mod tests {
     #[test]
     fn select_against_the_real_subprocess_degrades_safely_with_no_terminal() {
         // Exercises the real `select` -> `spawn` -> `Command::new("fzf")` path for
-        // real, unlike every other test in this module — deliberately safe to run
-        // whether or not `fzf` happens to be installed: `cargo test` itself never has
-        // a controlling terminal, so this must land on `Unavailable` either way
-        // (ExecError::Spawn if `fzf` isn't found; fzf's own exit 2 "no /dev/tty" if it
-        // is — see this module's doc comment for both, verified empirically during
-        // development). What it can't prove — the actual interactive selection UI on
-        // a real terminal, and that removing process-group isolation actually fixes
-        // the SIGTTIN hang — needs a real terminal; see the plan's manual verification
-        // steps for that.
+        // real, unlike every other test in this module. Only meaningful without a
+        // controlling terminal (CI, a headless runner, `setsid cargo test`): there
+        // this must land on `Unavailable` either way (ExecError::Spawn if `fzf` isn't
+        // found; fzf's own exit 2 "no /dev/tty" if it is — see this module's doc
+        // comment for both). `fzf` opens `/dev/tty` directly regardless of the piped
+        // stdio a test gets, so when that path is openable it would instead render its
+        // UI and block for a keypress — skip then rather than hijack the terminal.
+        // What this can't prove — the actual interactive selection UI, and that
+        // removing process-group isolation fixes the SIGTTIN hang — needs a real
+        // terminal; see the plan's manual verification steps for that.
+        if std::fs::File::open("/dev/tty").is_ok() {
+            return;
+        }
         let outcome = select(&std::env::current_dir().unwrap(), &lines());
         assert!(matches!(outcome, FzfOutcome::Unavailable(_)));
     }
@@ -507,6 +511,9 @@ mod tests {
     #[test]
     fn select_files_against_the_real_subprocess_degrades_safely_with_no_terminal() {
         // Same rationale as `select_against_the_real_subprocess_degrades_safely_with_no_terminal`.
+        if std::fs::File::open("/dev/tty").is_ok() {
+            return;
+        }
         let outcome = select_files(&std::env::current_dir().unwrap(), &file_lines());
         assert!(matches!(outcome, FzfMultiOutcome::Unavailable(_)));
     }

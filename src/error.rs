@@ -7,8 +7,6 @@
 //! single place where those per-stage enums are gathered and mapped to an actual
 //! [`ExitCode`]. No other module constructs or matches on raw exit-code integers.
 
-use std::fmt;
-
 /// A validated `ccm` process exit code (0-17, per prd.md "Error Handling").
 ///
 /// A newtype rather than a bare `u8` so a stray literal can't be passed around as an
@@ -41,18 +39,6 @@ impl ExitCode {
     #[must_use]
     pub const fn as_u8(self) -> u8 {
         self.0
-    }
-}
-
-impl From<ExitCode> for i32 {
-    fn from(code: ExitCode) -> Self {
-        i32::from(code.0)
-    }
-}
-
-impl fmt::Display for ExitCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
     }
 }
 
@@ -307,10 +293,5 @@ mod tests {
                 "wrong exit code for {err:?}"
             );
         }
-    }
-
-    #[test]
-    fn exit_code_as_i32_round_trips() {
-        assert_eq!(i32::from(ExitCode::EMPTY_MESSAGE), 15);
     }
 }

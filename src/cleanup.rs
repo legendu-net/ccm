@@ -28,7 +28,7 @@ pub fn clean_message(raw: &str) -> String {
 /// returned unchanged; same if there's no closing fence at all, or the message isn't
 /// fenced to begin with.
 #[must_use]
-pub fn strip_code_fence(msg: &str) -> String {
+fn strip_code_fence(msg: &str) -> String {
     let lines: Vec<&str> = msg.split('\n').collect();
     if lines.len() < 2 {
         return msg.to_string();
@@ -106,7 +106,7 @@ fn unwrap_quotes(text: &str) -> Option<&str> {
 /// `unwrap_quotes` for which pairs are recognized and what counts as "genuinely
 /// enclosing". Returns the message unchanged when neither wrap applies.
 #[must_use]
-pub fn strip_surrounding_quotes(msg: &str) -> String {
+fn strip_surrounding_quotes(msg: &str) -> String {
     if let Some(whole) = unwrap_quotes(msg.trim()) {
         return whole.trim().to_string();
     }

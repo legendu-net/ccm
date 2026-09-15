@@ -1,0 +1,9 @@
+name: Remove Branches
+on:
+  schedule:
+    - cron: '0 3 * * *'
+      timezone: 'America/Los_Angeles'
+jobs:
+  remove_branch:
+    uses: legendu-net/.github/.github/workflows/remove-branch.yaml@main
+    secrets: inherit

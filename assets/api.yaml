@@ -9,6 +9,14 @@
   max_tokens: 300
   temperature: 0.2
 
+- name: agy
+  type: agent_cli
+  enabled: true
+  prompt: default
+  command: agy
+  model: gemini-3.8-flash-high
+  args: ["--model", "{{model}}", "--dangerously-skip-permissions", "-p", "{{prompt}}"]
+
 - name: gemini-cli
   type: agent_cli
   enabled: true

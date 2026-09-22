@@ -57,7 +57,7 @@ Config directory: `$XDG_CONFIG_HOME/ccm/` if set to a non-empty value, otherwise
 Run `ccm --gen-config` to create the directory and write filled example versions of
 both files (never overwriting an existing one). See `prd.md`'s "Configuration" section
 for the full field reference (`type: openai_api` vs `type: agent_cli`, `headers`,
-`timeout`, `{{prompt}}`/`{{model}}`/`{{system}}` substitution, etc.).
+`timeout`, `{{model}}`/`{{system}}` substitution, etc.).
 
 Run `ccm --list-tools` to see what's configured. `--tool <NAME>` picks a named entry
 outright for a single run (even a disabled one); `--tool ''` (an empty name) forces the

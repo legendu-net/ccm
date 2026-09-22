@@ -98,6 +98,12 @@ pub enum ConfigError {
     UnknownEntryType { entry: String, kind: String },
     #[error("api.yaml entry {entry}: missing required field {field}")]
     MissingField { entry: String, field: &'static str },
+    #[error(
+        "api.yaml entry {entry}: args contains {{{{prompt}}}}, which is no longer supported — \
+         the prompt template is now joined with the diff and sent on stdin instead; remove \
+         {{{{prompt}}}} from args"
+    )]
+    ObsoletePromptPlaceholder { entry: String },
 }
 
 /// Stage 5: tool/API selection failed (exit 6) — either every `api.yaml` entry is
@@ -268,6 +274,10 @@ mod tests {
                     field: "y",
                 }
                 .into(),
+                5,
+            ),
+            (
+                ConfigError::ObsoletePromptPlaceholder { entry: "x".into() }.into(),
                 5,
             ),
             (SelectionError::NoEnabledTool.into(), 6),

@@ -15,7 +15,7 @@
   prompt: default
   command: agy
   model: gemini-3.8-flash-low
-  args: ["--model", "{{model}}", "--dangerously-skip-permissions", "-p", "{{prompt}}"]
+  args: ["--model", "{{model}}", "--dangerously-skip-permissions"]
 
 - name: gemini-cli
   type: agent_cli
@@ -23,4 +23,4 @@
   prompt: default
   command: gemini
   model: gemini-2.5-pro
-  args: ["-m", "{{model}}", "-p", "{{prompt}}"]
+  args: ["-m", "{{model}}"]

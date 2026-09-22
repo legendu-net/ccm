@@ -53,7 +53,7 @@ mod tests {
         .unwrap();
 
         let config = load(tmp.path()).unwrap();
-        assert_eq!(config.entries.len(), 2);
+        assert_eq!(config.entries.len(), 3);
         assert!(config.prompts.contains_key("default"));
     }
 

@@ -72,7 +72,7 @@ impl MessageGenerator for OpenAiGenerator<'_> {
         diff: &str,
     ) -> Result<GenerationOutcome, GenerationError> {
         let api_key = resolve_api_key(&self.entry.api_key, self.env)?;
-        let user_message_text = prompt::openai_user_message(prompt.template, diff);
+        let user_message_text = prompt::user_message(prompt.template, diff);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

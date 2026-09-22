@@ -972,16 +972,14 @@ Fields (per key):
     entry's `template` instead — e.g. as a `\n\n`-separated preamble at the top of it.
     This is purely a user-authoring convention with nothing for `ccm` to parse or
     enforce; it just echoes the `\n\n` `ccm` itself inserts between `template` and the
-    diff for `openai_api` entries (see Message construction), a mechanism that doesn't
-    apply to `agent_cli` at all (its diff goes to the child process's stdin, never
-    concatenated into `template`).
+    diff (see Message construction) for both entry types.
 - `template` (string, required) — the prompt body, used as-is with no placeholder
     substitution — it has neither a `{{diff}}` nor a `{{files}}` placeholder, since the
     diff already names every changed file. Instead, `ccm` appends the diff after the
-    template when building the `openai_api` user message (see Message construction
-    below); for `agent_cli` entries the diff is written to the child process's stdin
-    instead (see `args` under `type: agent_cli` fields), keeping it out of the
-    command-line argument that carries the template and avoiding `ARG_MAX`.
+    template when building the user message (see Message construction below): for
+    `openai_api` entries that message is the `user` role message; for `agent_cli`
+    entries it's written to the child process's stdin instead (see `args` under
+    `type: agent_cli` fields), keeping it out of the command-line argument entirely.
 
 ### `api.yaml` — ordered list of tools/APIs to try
 
@@ -1005,7 +1003,7 @@ A top-level list — the first entry that is `enabled` wins (see Selection).
   prompt: default
   command: gemini
   model: gemini-2.5-pro
-  args: ["-m", "{{model}}", "-p", "{{prompt}}"]
+  args: ["-m", "{{model}}"]
 ```
 
 Common fields (all entry types):
@@ -1025,15 +1023,17 @@ Common fields (all entry types):
     `type`: see `timeout` under `type: openai_api` fields and `type: agent_cli` fields
     below.
 
-`type: openai_api` fields:
-
 Message construction: the resolved prompt's `system` (if set) is sent as the `system`
-role message. The `user` role message is the `template` text, verbatim (no trimming of
-its own trailing whitespace), followed by a `\n\n` separator `ccm` inserts, followed by
-the computed diff verbatim — the template text itself never contains the diff or a file
-list, and `ccm` never inserts a label like `Diff:` before it, since the diff output
-itself (git's or jj's, whichever "Diff generation" produced) already makes clear where
-it starts — in a standard chat completion request.
+role message for `openai_api` entries (for `agent_cli` entries, see `system` under
+`prompts.yaml` fields above). The user message — the `openai_api` `user` role message
+in a standard chat completion request, or the text written to an `agent_cli` child
+process's stdin — is the `template` text, verbatim (no trimming of its own trailing
+whitespace), followed by a `\n\n` separator `ccm` inserts, followed by the computed diff
+verbatim — the template text itself never contains the diff or a file list, and `ccm`
+never inserts a label like `Diff:` before it, since the diff output itself (git's or
+jj's, whichever "Diff generation" produced) already makes clear where it starts.
+
+`type: openai_api` fields:
 
 - `base_url` (string, required).
 - `model` (string, required).
@@ -1059,25 +1059,30 @@ it starts — in a standard chat completion request.
     validation against the agent CLI's own model list. If the agent CLI rejects it
     (e.g. because it's stale or renamed), that surfaces at call time as a tool/API call
     failure — see exit code 10.
-- `args` (list<string>, required) — arguments passed to the command; `{{prompt}}`,
-    `{{model}}`, and `{{system}}` are substituted with the rendered prompt, the
-    configured model, and the resolved prompt's `system` text respectively. The rendered
-    prompt substituted for `{{prompt}}` is just the `template` text — it never contains
-    the diff or a file list. `{{system}}` is optional to include: an agent CLI with a
+- `args` (list<string>, required) — arguments passed to the command; `{{model}}` and
+    `{{system}}` are substituted with the configured model and the resolved prompt's
+    `system` text respectively. `{{system}}` is optional to include: an agent CLI with a
     native system-prompt flag wires it up by including `{{system}}` in `args` (e.g.
     `"--system"`, `"{{system}}"`); an agent CLI without one simply omits `{{system}}`
     from `args` entirely, in which case `system` (if set in `prompts.yaml`) has no
     effect (see `system` under `prompts.yaml` fields). If `{{system}}` is present in
     `args` but the resolved prompt has no `system` set, it's substituted with an empty
-    string. The computed diff is instead written to the child process's stdin and stdin
-    is then closed, so the agent CLI reads it separately from the `-p`/`{{prompt}}`
-    argument; this keeps a large diff out of `args` entirely and avoids `ARG_MAX`.
+    string. There is no `{{prompt}}` placeholder: unlike `{{model}}`/`{{system}}`, which
+    are short, fixed-shape values safe to pass as a command-line argument, the prompt is
+    joined with the diff (see Message construction) and the combined text is written to
+    the child process's stdin, which is then closed — the same reasons a diff never
+    belongs in `args` (size, shell-safety) apply just as much to the prompt template
+    that precedes it, so both travel together on stdin instead. A config that still sets
+    `{{prompt}}` in `args` is rejected as a config error (exit 5) — the placeholder is no
+    longer substituted, so leaving it in place would otherwise silently pass the seven
+    literal characters `{{prompt}}` to the agent CLI as an argument.
 - `env` (map<string,string>, optional) — extra environment variables for the child process.
 - `timeout` (see `timeout` under Common fields above) — wall-clock limit measured from
     spawning the subprocess. This is the safety net for an agent CLI that hangs for a
     reason `ccm` can't prevent directly — a network call stuck inside the agent CLI
-    itself, or an interactive prompt of its own despite stdin already being closed (see
-    `args` above) — which would otherwise hang forever, since Requirement 4 rules out a
+    itself, or an interactive prompt of its own despite stdin already being closed once
+    the prompt and diff are written (see `args` above) — which would otherwise hang
+    forever, since Requirement 4 rules out a
     fallback that could paper over it. On expiry, `ccm` sends `SIGTERM`, waits a
     2-second grace period for the process to exit on its own, then sends `SIGKILL` if
     it's still running; either way, this is reported as exit code 10 once the process

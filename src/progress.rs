@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn section_break_writes_a_single_equals_line() {
-        assert_eq!(captured(|w| section_break(w)), format!("{EQUALS_LINE}\n"));
+        assert_eq!(captured(section_break), format!("{EQUALS_LINE}\n"));
     }
 
     #[test]

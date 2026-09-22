@@ -1,7 +1,7 @@
 //! `type: agent_cli` backend (prd.md, `type: agent_cli` fields under Configuration): a
-//! subprocess whose argv is `{{prompt}}`/`{{model}}`/`{{system}}`-substituted, and
-//! which receives the diff on stdin (stdin is then closed) rather than as an argument —
-//! keeping a large diff out of `args` entirely and avoiding `ARG_MAX`.
+//! subprocess whose argv is `{{model}}`/`{{system}}`-substituted; the prompt template
+//! and the diff are joined (same as the `openai_api` user message, via
+//! `prompt::user_message`) and written to stdin, which is then closed.
 
 use super::{GenerationOutcome, MessageGenerator};
 use crate::config::model::AgentCliEntry;
@@ -30,7 +30,8 @@ impl MessageGenerator for AgentCliGenerator<'_> {
         prompt: &ResolvedPrompt<'_>,
         diff: &str,
     ) -> Result<GenerationOutcome, GenerationError> {
-        let args = prompt::substitute_args(&self.entry.args, prompt, &self.entry.model);
+        let args = prompt::substitute_args(&self.entry.args, prompt.system, &self.entry.model);
+        let stdin_payload = prompt::user_message(prompt.template, diff);
         let env: Vec<(String, String)> = self
             .entry
             .env
@@ -41,7 +42,7 @@ impl MessageGenerator for AgentCliGenerator<'_> {
             program: &self.entry.command,
             args: &args,
             cwd: self.cwd,
-            stdin: Some(diff.as_bytes()),
+            stdin: Some(stdin_payload.as_bytes()),
             env: &env,
             timeout: Some(Duration::from_secs(self.entry.timeout_secs)),
         };
@@ -115,33 +116,27 @@ mod tests {
     }
 
     #[test]
-    fn substitutes_prompt_and_model_placeholders() {
-        // `sh -c script arg0 arg1 arg2` sets $0=arg0, $1=arg1, $2=arg2 inside the
-        // script, so $1/$2 below are the substituted {{model}}/{{prompt}} values.
+    fn substitutes_model_placeholder_in_args() {
+        // `sh -c script arg0 arg1` sets $0=arg0, $1=arg1 inside the script, so $1 below
+        // is the substituted {{model}} value.
         let e = entry(
             "/bin/sh",
-            &[
-                "-c",
-                "printf 'MODEL=%s PROMPT=%s\\n' \"$1\" \"$2\"",
-                "sh",
-                "{{model}}",
-                "{{prompt}}",
-            ],
+            &["-c", "printf 'MODEL=%s\\n' \"$1\"", "sh", "{{model}}"],
             30,
         );
         let cwd = std::env::temp_dir();
         let generator = AgentCliGenerator::new(&e, &cwd);
         let out = generator.generate(&prompt(), "diff content here").unwrap();
-        assert_eq!(out.message, "MODEL=test-model PROMPT=write it\n");
+        assert_eq!(out.message, "MODEL=test-model\n");
     }
 
     #[test]
-    fn diff_is_readable_on_stdin_and_stdin_is_closed() {
+    fn prompt_template_and_diff_are_joined_on_stdin_which_is_then_closed() {
         let e = sh_script("cat", 30);
         let cwd = std::env::temp_dir();
         let generator = AgentCliGenerator::new(&e, &cwd);
         let out = generator.generate(&prompt(), "the diff\n").unwrap();
-        assert_eq!(out.message, "the diff\n");
+        assert_eq!(out.message, "write it\n\nthe diff\n");
     }
 
     #[test]

@@ -4,6 +4,7 @@
 mod common;
 
 use common::Fixture;
+use predicates::prelude::*;
 
 fn valid_prompts() -> &'static str {
     "default:\n  template: write a commit message\n"
@@ -73,6 +74,24 @@ fn unknown_prompt_reference_is_exit_5() {
         .arg(fx.config_dir())
         .assert()
         .code(5);
+}
+
+#[test]
+fn agent_cli_args_containing_prompt_placeholder_is_exit_5_with_guidance() {
+    // prd.md, `type: agent_cli` fields under Configuration: `{{prompt}}` in `args` is
+    // obsolete now that the prompt template is joined with the diff and sent on stdin
+    // instead (see src/backend/agent_cli.rs and src/prompt.rs).
+    let fx = Fixture::new();
+    fx.init_git();
+    let api = "- name: a\n  type: agent_cli\n  prompt: default\n  command: agent\n  model: m\n  args: [\"-p\", \"{{prompt}}\"]\n";
+    fx.write_config(api, valid_prompts());
+    fx.ccm()
+        .args(["--config"])
+        .arg(fx.config_dir())
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("{{prompt}}"))
+        .stderr(predicate::str::contains("no longer supported"));
 }
 
 #[test]

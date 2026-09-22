@@ -20,7 +20,9 @@ use std::collections::HashSet;
 /// # Errors
 /// A [`ConfigError`] (exit 5) for: an empty `api.yaml`, a duplicate entry `name`, an
 /// entry referencing an unknown prompt, an unrecognized `type`, a missing
-/// type-required field, or an `api_key` that doesn't set exactly one of `env`/`value`.
+/// type-required field, an `api_key` that doesn't set exactly one of `env`/`value`, or
+/// an `agent_cli` entry whose `args` still contains the obsolete `{{prompt}}`
+/// placeholder.
 pub fn validate(raw_prompts: RawPrompts, raw_entries: RawEntries) -> Result<Config, ConfigError> {
     if raw_entries.is_empty() {
         return Err(ConfigError::Empty);
@@ -88,6 +90,11 @@ fn build_entry_kind(name: &str, raw: RawEntry) -> Result<EntryKind, ConfigError>
             let command = require_non_empty(name, "command", raw.command)?;
             let model = require_non_empty(name, "model", raw.model)?;
             let args = require(name, "args", raw.args)?;
+            if args.iter().any(|arg| arg.contains("{{prompt}}")) {
+                return Err(ConfigError::ObsoletePromptPlaceholder {
+                    entry: name.to_string(),
+                });
+            }
             Ok(EntryKind::AgentCli(AgentCliEntry {
                 command,
                 model,
@@ -230,7 +237,7 @@ mod tests {
             temperature: None,
             headers: None,
             command: Some("gemini".to_string()),
-            args: Some(vec!["-p".to_string(), "{{prompt}}".to_string()]),
+            args: Some(vec!["-m".to_string(), "{{model}}".to_string()]),
             env: None,
             model: Some("gemini-2.5-pro".to_string()),
         }
@@ -261,7 +268,7 @@ mod tests {
         match &config.entries[0].kind {
             EntryKind::AgentCli(e) => {
                 assert_eq!(e.command, "gemini");
-                assert_eq!(e.args, vec!["-p", "{{prompt}}"]);
+                assert_eq!(e.args, vec!["-m", "{{model}}"]);
             }
             EntryKind::OpenaiApi(_) => panic!("expected agent_cli"),
         }
@@ -350,6 +357,26 @@ mod tests {
         assert!(matches!(
             validate(prompts_with("default"), vec![entry]),
             Err(ConfigError::MissingField { field: "model", .. })
+        ));
+    }
+
+    #[test]
+    fn agent_cli_args_containing_prompt_placeholder_is_rejected() {
+        let mut entry = agent_cli_entry("a", "default");
+        entry.args = Some(vec!["-p".to_string(), "{{prompt}}".to_string()]);
+        assert!(matches!(
+            validate(prompts_with("default"), vec![entry]),
+            Err(ConfigError::ObsoletePromptPlaceholder { entry }) if entry == "a"
+        ));
+    }
+
+    #[test]
+    fn agent_cli_args_with_prompt_placeholder_embedded_in_a_larger_arg_is_rejected() {
+        let mut entry = agent_cli_entry("a", "default");
+        entry.args = Some(vec!["--prompt={{prompt}}".to_string()]);
+        assert!(matches!(
+            validate(prompts_with("default"), vec![entry]),
+            Err(ConfigError::ObsoletePromptPlaceholder { .. })
         ));
     }
 

@@ -17,11 +17,35 @@ pub fn git_commit_args(message: &str) -> Vec<String> {
     vec!["commit".to_string(), "-m".to_string(), message.to_string()]
 }
 
-/// `jj --no-pager diff --color=never --summary` — the working-copy file enumeration
-/// call, only used when `--include`/`--exclude` was given.
+/// `\x1f` (ASCII "unit separator") — the field delimiter between the status character
+/// and the two paths in [`jj_enumerate_args`]'s template output. Chosen over reusing
+/// jj's own human-oriented `--summary` brace notation (`{<old> => <new>}`) for
+/// renames/copies, which turned out to be genuinely ambiguous to parse back for some
+/// real filenames — jj does not escape a literal `{`/`}` a filename itself contains, so
+/// depth/boundary heuristics over that notation could still be fooled by a sufficiently
+/// adversarial path (prd.md "Diff scope resolution" has the history). A control
+/// character reserved by the ASCII standard for exactly this purpose, and one no
+/// realistic path will ever contain, sidesteps that whole class of problem instead of
+/// trying to out-clever it.
+pub const ENUMERATE_FIELD_SEP: char = '\u{1f}';
+
+/// jj template-language source for [`jj_enumerate_args`]'s `-T` flag: one
+/// `<status-char><SEP><source-path><SEP><target-path>` record per line (`\n`-terminated,
+/// `SEP` = [`ENUMERATE_FIELD_SEP`]). `source`/`target` are jj's own `TreeDiffEntry`
+/// "left"/"right" accessors — equal to each other for `M`/`A`/`D`, the old/new path for
+/// `R`/`C` — and `.display()` reports each path relative to the current working
+/// directory, the same basis `jj diff --summary` used.
+const ENUMERATE_TEMPLATE: &str = "status_char ++ \"\\x1f\" ++ source.path().display() \
+     ++ \"\\x1f\" ++ target.path().display() ++ \"\\n\"";
+
+/// `jj --no-pager diff --color=never -T <template>` — the working-copy file enumeration
+/// call, only used when `--include`/`--exclude` was given (or the interactive file
+/// picker needs the candidate list). See [`ENUMERATE_TEMPLATE`]/[`ENUMERATE_FIELD_SEP`].
 #[must_use]
-pub fn jj_summary_args() -> Vec<String> {
-    strs(&["--no-pager", "diff", "--color=never", "--summary"])
+pub fn jj_enumerate_args() -> Vec<String> {
+    let mut args = strs(&["--no-pager", "diff", "--color=never", "-T"]);
+    args.push(ENUMERATE_TEMPLATE.to_string());
+    args
 }
 
 /// `jj --no-pager diff --color=never <files...>`. `files` is empty when neither
@@ -112,11 +136,25 @@ mod tests {
     }
 
     #[test]
-    fn jj_summary_args_match_the_spec_exactly() {
+    fn jj_enumerate_args_match_the_spec_exactly() {
         assert_eq!(
-            jj_summary_args(),
-            vec!["--no-pager", "diff", "--color=never", "--summary"]
+            jj_enumerate_args(),
+            vec![
+                "--no-pager",
+                "diff",
+                "--color=never",
+                "-T",
+                ENUMERATE_TEMPLATE,
+            ]
         );
+    }
+
+    #[test]
+    fn enumerate_template_uses_the_field_sep_constant_consistently() {
+        // Pins that the template's `\x1f` escapes and `ENUMERATE_FIELD_SEP` agree —
+        // `summary.rs` parses by splitting on the constant, not by re-deriving it.
+        assert_eq!(ENUMERATE_FIELD_SEP, '\u{1f}');
+        assert_eq!(ENUMERATE_TEMPLATE.matches("\\x1f").count(), 2);
     }
 
     #[test]

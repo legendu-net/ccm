@@ -387,20 +387,38 @@ by the fileset language rather than rejected, and `ccm` needs to surface a typo'
 `--include`/`--exclude` path as a usage error (exit code 2, see below) instead of
 silently diffing an empty or unintended scope. So to resolve `--exclude` (and to
 validate both `--include` and `--exclude` paths per the rule below), `ccm` first
-enumerates the full set of changed
-paths in the jj working copy, one entry per `jj diff --summary` line rather than a
-deduplicated set of bare strings (see the rename/copy handling below for why that
-distinction matters) — e.g. via `jj --no-pager diff --color=never --summary`, using the
-same color/pager-suppressing flags as "Diff generation" above since this output is
-parsed programmatically too. This enumeration call is a real subprocess invocation in
-its own right, distinct from the final `jj diff <files...>` call below, and can fail the
-same way a diff invocation can — e.g. `jj` not found, or erroring inside a jj repository
-for some other reason — which is reported the same way: exit code 7 (see Error
-Handling). It is not itself progress-logged (it runs fast enough, and often enough, that
-a dedicated pair of lines would just be noise) — only the `Generating diff using:
-<command>` line for the final synthesized command below (see Progress logging). `jj diff
---summary` reports paths relative to the current working directory, the same basis
-`--include`/`--exclude` are given in (see Flags above).
+enumerates the full set of changed paths in the jj working copy, one entry per changed
+file rather than a deduplicated set of bare strings (see the rename/copy handling below
+for why that distinction matters) — via `jj --no-pager diff --color=never -T
+<template>`, using the same color/pager-suppressing flags as "Diff generation" above
+since this output is parsed programmatically too. `<template>` is jj's own
+template-expression language (`jj help -k templates`), not a flag `ccm` invents: it
+renders one `<status-char><SEP><source-path><SEP><target-path>` record per line
+(`\n`-terminated, `SEP` the ASCII "unit separator" `\x1f`, chosen because no realistic
+path can ever contain it) built from `TreeDiffEntry`'s own `status_char`/`source`/
+`target` accessors — see `vcs::argv::ENUMERATE_TEMPLATE` for the exact expression. This
+enumeration call is a real subprocess invocation in its own right, distinct from the
+final `jj diff <files...>` call below, and can fail the same way a diff invocation can —
+e.g. `jj` not found, or erroring inside a jj repository for some other reason — which is
+reported the same way: exit code 7 (see Error Handling). It is not itself
+progress-logged (it runs fast enough, and often enough, that a dedicated pair of lines
+would just be noise) — only the `Generating diff using: <command>` line for the final
+synthesized command below (see Progress logging). `.display()` in the template reports
+each path relative to the current working directory, the same basis `--include`/
+`--exclude` are given in (see Flags above).
+
+`ccm` used to run `jj diff --summary` for this and parse its human-oriented output
+instead, where a rename/copy line shows `<old>`/`<new>` factored into a shared
+prefix/suffix with the differing middle in braces (e.g. `R src/{old.rs => new.rs}`).
+That notation turned out to be genuinely ambiguous to parse back in several real cases —
+jj does not escape a literal `{`/`}` a filename itself contains, so no amount of smarter
+brace-matching (bracket-depth tracking, then boundary-adjacency to a path separator)
+fully closed the gap; each fix in turn was defeated by a new real example, including one
+found in this very repository (a `.github/workflow/` → `.github/workflows/` rename).
+The template-based format sidesteps that whole class of problem rather than continuing
+to out-clever it: `SEP` can never appear in a path, so recovering `<status>`/`<old>`/
+`<new>` from a line is a plain three-way split, with no ambiguity to reason about at
+all.
 
 Known limitation, left unaddressed: the enumeration call and the final `jj diff
 <files...>` invocation below are two separate subprocess calls, so the working copy can
@@ -418,7 +436,7 @@ any `CurDir` (`.`) component is dropped (a trailing separator, e.g. `src/`, prod
 trailing empty component either, so it normalizes the same as `src`), and the
 remaining components are rejoined with a single `/` — so e.g. `./src/main.rs` and
 `src//main.rs` both normalize to `src/main.rs`, and a harmless difference in how the
-user spelled a path doesn't fail to match jj's own (already-clean) `--summary` output
+user spelled a path doesn't fail to match jj's own (already-clean) enumeration output
 and wrongly trip the unmatched-path usage error below. This is purely lexical — no
 filesystem access, no symlink resolution, and `..` components are left as-is rather
 than collapsed — so it normalizes spelling, not identity: a path that only resolves to
@@ -455,30 +473,17 @@ working copy — whether given as an exact file path or as a directory prefix �
 typo'd file name, or a directory containing no changed files) is a usage error (exit
 code 2), not silently ignored.
 
-A `jj diff --summary` line for a rename or copy does not show `<old>` and `<new>` as two
-independent full paths. jj factors out the longest common leading path they share (split
-on `/`, cwd-relative, possibly empty) and shows only the differing suffixes in braces:
+A rename/copy record's `<source>` and `<target>` fields are simply `<old>` and `<new>` —
+jj's `TreeDiffEntry::source`/`::target` accessors report the true old/new path directly,
+with no shared-prefix/suffix factoring or brace notation to recover them from (that was
+a property of the old `--summary`-based text format's human-oriented rendering, not of
+the underlying data). For a plain modification/addition/deletion (`M`/`A`/`D`) record,
+`<source>` and `<target>` are simply identical — jj's template emits both fields
+unconditionally, not just for a rename/copy — so `ccm` discards `<source>` for those
+statuses rather than expose the redundant duplicate; only a rename/copy's independent
+`<old>` name is ever useful downstream (see below).
 
-```
-R <prefix>{<old-suffix> => <new-suffix>}
-C <prefix>{<old-suffix> => <new-suffix>}
-```
-
-e.g. `R src/{old.rs => new.rs}` (shared `src/` factored out), or `R {a.txt => sub/b.txt}`
-when there's no shared prefix at all — `<prefix>` is then empty and the line starts
-directly with `{`. `ccm` recovers `<old>` and `<new>` from a line like this by taking
-everything between the status character's trailing space and the line's first `{` as
-`<prefix>`; everything between that `{` and the line's final `}` (always the line's last
-character) split once on the literal substring `" => "` as `<old-suffix>`/`<new-suffix>`;
-then concatenating: `<old> = <prefix> + <old-suffix>`, `<new> = <prefix> + <new-suffix>`.
-This is unambiguous for any path that doesn't itself contain a literal `{`, `}`, or the
-exact substring `" => "` — the same class of edge-case risk the `#CCM: ` comment-prefix
-stripping elsewhere in this doc already accepts, not a new kind of limitation. Lines for
-a plain modification/addition/deletion (`M`/`A`/`D`) never use this braced form — the
-whole remainder of the line after the status character is the one path, as already
-described above.
-
-Once `<old>` and `<new>` are recovered this way, they are matched by `--include`/`--exclude`
+`<old>` and `<new>` are matched by `--include`/`--exclude`
 against either name — using the same exact-match-or-directory-prefix rule described
 above, so a directory entry covering `<old>` or `<new>` matches the line just as a bare
 file entry would — naming either path includes/excludes the line as a whole, contributing
@@ -488,10 +493,10 @@ definition (an unchanged copy source has nothing of its own to diff), so `<new>`
 only path with content to show either way. The resulting file-argument list is
 deduplicated before being passed to `jj diff <files...>`: naming both `<old>` and
 `<new>` of the same rename/copy in one `--include` still matches the one line just
-once, contributing `<new>` a single time, not twice. Matching is done per summary line, not by
-deduplicating path strings across lines: a copy's source can also carry independent
-changes of its own, reported as its own separate summary line for `<old>`, and that line
-is included/excluded on its own terms — contributing `<old>` itself to the
+once, contributing `<new>` a single time, not twice. Matching is done per enumeration
+line, not by deduplicating path strings across lines: a copy's source can also carry
+independent changes of its own, reported as its own separate line for `<old>`, and that
+line is included/excluded on its own terms — contributing `<old>` itself to the
 file-argument list — regardless of the `C` line's outcome, so an independently-modified
 copy source is never silently dropped. This also means naming `<old>` in
 `--include`/`--exclude` affects both lines that mention it, the copy's `<new>` mapping
@@ -506,8 +511,8 @@ accepted (see the usage-error note above).
 
 In default mode (not `--dry-run`), for a jj repository, when neither `--include` nor
 `--exclude` was given, `ccm` enumerates the working copy the same way resolving
-`--include`/`--exclude` does (`jj diff --summary`, see above — not itself
-progress-logged) *before* deciding whether to prompt at all. With at most one changed file, there
+`--include`/`--exclude` does (the `jj diff -T <template>` enumeration call, see above —
+not itself progress-logged) *before* deciding whether to prompt at all. With at most one changed file, there
 is nothing meaningfully different between "the whole working copy" and "a chosen
 subset" — so `ccm` skips straight to the whole working copy, exactly as if this feature
 didn't exist, no prompt shown. (Zero changed files still surfaces as the usual "nothing
@@ -525,8 +530,8 @@ Answering yes offers a picker over the enumerated files: `fzf` when it's on `$PA
 stdin is a real usable terminal, and `CCM_FUZZY` isn't `0` (see Selection and
 "Preferences of Dependencies" item 8), or a numbered stdin prompt otherwise. Each
 candidate is shown as `<status>  <path>`
-(the same status character and target path `jj diff --summary` parsing already produces,
-never the raw `<old> => <new>` brace form — see the rename/copy handling above). The
+(the same status character and `<target>` path the enumeration parsing already
+produces, never `<source>` — see the rename/copy handling above). The
 `fzf` front-end additionally previews the highlighted file's own diff in a side pane
 (`jj --no-pager diff --color=always -- <path>`), letting the choice be made by eye. Both
 front-ends allow marking any number of candidates before confirming — `fzf` via
@@ -807,8 +812,8 @@ is reserved solely for the generated message under `--dry-run`, so progress outp
 never ends up mixed into it even when stdout is piped/captured. Roughly, in order:
 
 - `Generating diff using: <command>` — before running the `git diff`/`jj diff` invocation.
-    For jj with `--include`/`--exclude`, the `jj diff --summary` enumeration call used to
-    resolve the scope (see "Diff scope resolution") runs first but is not itself
+    For jj with `--include`/`--exclude`, the `jj diff -T <template>` enumeration call
+    used to resolve the scope (see "Diff scope resolution") runs first but is not itself
     progress-logged.
 - `Generating commit message using <name> (<model>)…` — before calling the selected
     `api.yaml` entry.
@@ -1245,8 +1250,8 @@ later stages are never reached:
    tool-picker prompt — fails fast without first paying for a potentially large diff.
 6. **Diff generation** — for jj with `--include`/`--exclude`, or in default mode for a
    jj repository with neither given (the interactive file picker, see "Interactive file
-   selection"), first running the `jj diff --summary` enumeration call (exit code 7 if
-   this subprocess itself fails, see "Diff scope resolution"). For the interactive file
+   selection"), first running the `jj diff -T <template>` enumeration call (exit code 7
+   if this subprocess itself fails, see "Diff scope resolution"). For the interactive file
    picker specifically, the enumerated count then decides whether it prompts at all: at
    most one changed file skips straight to the next step with no prompt; two or more
    shows the yes/no prompt, then — only if answered yes — a picker over the enumerated
@@ -1304,7 +1309,7 @@ before 15 in the table.
 | 4 | Not a git or jj repository |
 | 5 | Config error — `api.yaml`/`prompts.yaml` missing, unreadable (e.g. permission denied), fails to parse, fails validation (including a duplicate `name` across `api.yaml` entries), references an unknown prompt, or `api.yaml` is an empty list; looked up in the config directory (the default described under `--config` in Flags, or the directory given via `--config`) |
 | 6 | Tool/API selection failed — under `--dry-run` with no `--tool`, every `api.yaml` entry is disabled (default mode instead prompts in this case — see "Selection"), or a non-empty `--tool <NAME>` matched no entry |
-| 7 | Diff generation failed — the underlying `git diff`/`jj diff` invocation itself errored; for jj with `--include`/`--exclude` this also covers the `jj diff --summary` enumeration call failing (see "Diff scope resolution") |
+| 7 | Diff generation failed — the underlying `git diff`/`jj diff` invocation itself errored; for jj with `--include`/`--exclude` this also covers the `jj diff -T <template>` enumeration call failing (see "Diff scope resolution") |
 | 8 | Nothing to diff — no staged changes (git), or an empty working-copy diff (jj) after applying `--include`/`--exclude` |
 | 9 | API key resolution failed |
 | 10 | Tool/API call failed — network error, exceeding the entry's `timeout` (see `timeout` under Common fields; for `agent_cli` the subprocess is killed via `SIGTERM`, then `SIGKILL` if it hasn't exited within the grace period, before this is reported, and any stderr output it had produced up to that point is still included in the reported error, same as any other `agent_cli` failure), non-zero exit, or an explicit API-level error response. For `agent_cli`, this also covers the agent CLI rejecting the configured `model` at run time (e.g. `Error: invalid model selection`), since `model` is passed through unvalidated — `ccm` includes the agent CLI's stderr output in the reported error so the user can tell a bad model apart from other tool failures. For `openai_api`, a non-2xx response's body is surfaced the same way — included in the reported error alongside the HTTP status code, not just the status code alone — so the user can see the actual routing/provider error text (e.g. from OmniRoute) behind a failure, the same diagnostic value the `agent_cli` stderr inclusion provides. |

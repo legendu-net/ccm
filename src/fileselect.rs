@@ -125,15 +125,34 @@ fn candidate_lines(entries: &[SummaryEntry], targets: &[String]) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vcs::summary::parse_summary;
 
-    fn entries(text: &str) -> Vec<SummaryEntry> {
-        parse_summary(text).unwrap()
+    fn m(path: &str) -> SummaryEntry {
+        SummaryEntry {
+            status: 'M',
+            source: None,
+            target: path.to_string(),
+        }
+    }
+
+    fn a(path: &str) -> SummaryEntry {
+        SummaryEntry {
+            status: 'A',
+            source: None,
+            target: path.to_string(),
+        }
+    }
+
+    fn r(source: &str, target: &str) -> SummaryEntry {
+        SummaryEntry {
+            status: 'R',
+            source: Some(source.to_string()),
+            target: target.to_string(),
+        }
     }
 
     #[test]
     fn dedup_targets_preserves_first_seen_order_and_drops_duplicates() {
-        let entries = entries("M a.rs\nA b.rs\nM a.rs\n");
+        let entries = vec![m("a.rs"), a("b.rs"), m("a.rs")];
         assert_eq!(
             dedup_targets(&entries),
             vec!["a.rs".to_string(), "b.rs".to_string()]
@@ -142,7 +161,7 @@ mod tests {
 
     #[test]
     fn candidate_lines_pair_status_with_target() {
-        let entries = entries("M a.rs\nA b.rs\n");
+        let entries = vec![m("a.rs"), a("b.rs")];
         let targets = dedup_targets(&entries);
         assert_eq!(
             candidate_lines(&entries, &targets),
@@ -152,7 +171,7 @@ mod tests {
 
     #[test]
     fn candidate_lines_use_the_rename_targets_new_name() {
-        let entries = entries("R src/{old.rs => new.rs}\n");
+        let entries = vec![r("src/old.rs", "src/new.rs")];
         let targets = dedup_targets(&entries);
         assert_eq!(targets, vec!["src/new.rs".to_string()]);
         assert_eq!(

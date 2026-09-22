@@ -1,4 +1,4 @@
-//! Resolving `--include`/`--exclude` against a parsed `jj diff --summary` (prd.md,
+//! Resolving `--include`/`--exclude` against parsed jj diff enumeration entries (prd.md,
 //! "Diff scope resolution"). Pure — operates purely over already-parsed
 //! [`SummaryEntry`] data.
 //!
@@ -172,11 +172,38 @@ pub(crate) fn dedup_preserve_order(iter: impl Iterator<Item = String>) -> Vec<St
 
 #[cfg(test)]
 mod tests {
-    use super::super::summary::parse_summary;
     use super::*;
 
-    fn entries(lines: &str) -> Vec<SummaryEntry> {
-        parse_summary(lines).unwrap()
+    fn m(path: &str) -> SummaryEntry {
+        SummaryEntry {
+            status: 'M',
+            source: None,
+            target: path.to_string(),
+        }
+    }
+
+    fn a(path: &str) -> SummaryEntry {
+        SummaryEntry {
+            status: 'A',
+            source: None,
+            target: path.to_string(),
+        }
+    }
+
+    fn r(source: &str, target: &str) -> SummaryEntry {
+        SummaryEntry {
+            status: 'R',
+            source: Some(source.to_string()),
+            target: target.to_string(),
+        }
+    }
+
+    fn c(source: &str, target: &str) -> SummaryEntry {
+        SummaryEntry {
+            status: 'C',
+            source: Some(source.to_string()),
+            target: target.to_string(),
+        }
     }
 
     fn patterns(items: &[&str]) -> Vec<NormalizedPath> {
@@ -185,7 +212,7 @@ mod tests {
 
     #[test]
     fn all_contributes_every_target_in_order() {
-        let e = entries("M a.rs\nA b.rs\nR c/{old.rs => new.rs}\n");
+        let e = vec![m("a.rs"), a("b.rs"), r("c/old.rs", "c/new.rs")];
         let result = resolve_scope(&e, &Selection::All).unwrap();
         assert_eq!(result, vec!["a.rs", "b.rs", "c/new.rs"]);
     }
@@ -195,7 +222,7 @@ mod tests {
         // The interactive file picker (`fileselect.rs`) already resolves against
         // real enumerated entries before building this variant, so `resolve_scope`
         // itself ignores `entries` for it — pass an unrelated one to pin that.
-        let e = entries("M unrelated.rs\n");
+        let e = vec![m("unrelated.rs")];
         let sel = Selection::Explicit(vec![
             "b.rs".to_string(),
             "a.rs".to_string(),
@@ -207,7 +234,7 @@ mod tests {
 
     #[test]
     fn include_restricts_to_matched_files() {
-        let e = entries("M a.rs\nA b.rs\nM src/x.rs\n");
+        let e = vec![m("a.rs"), a("b.rs"), m("src/x.rs")];
         let sel = Selection::Include(patterns(&["a.rs"]));
         let result = resolve_scope(&e, &sel).unwrap();
         assert_eq!(result, vec!["a.rs"]);
@@ -215,7 +242,7 @@ mod tests {
 
     #[test]
     fn include_a_directory_matches_every_nested_file() {
-        let e = entries("M src/a.rs\nM src/sub/b.rs\nM other.rs\n");
+        let e = vec![m("src/a.rs"), m("src/sub/b.rs"), m("other.rs")];
         let sel = Selection::Include(patterns(&["src"]));
         let result = resolve_scope(&e, &sel).unwrap();
         assert_eq!(result, vec!["src/a.rs", "src/sub/b.rs"]);
@@ -223,7 +250,7 @@ mod tests {
 
     #[test]
     fn include_an_unmatched_entry_is_a_scope_error() {
-        let e = entries("M a.rs\n");
+        let e = vec![m("a.rs")];
         let sel = Selection::Include(patterns(&["typo.rs"]));
         let err = resolve_scope(&e, &sel).unwrap_err();
         assert_eq!(err.entry, "typo.rs");
@@ -231,7 +258,7 @@ mod tests {
 
     #[test]
     fn exclude_removes_matched_files_and_keeps_the_rest() {
-        let e = entries("M a.rs\nA b.rs\nM c.rs\n");
+        let e = vec![m("a.rs"), a("b.rs"), m("c.rs")];
         let sel = Selection::Exclude(patterns(&["b.rs"]));
         let result = resolve_scope(&e, &sel).unwrap();
         assert_eq!(result, vec!["a.rs", "c.rs"]);
@@ -239,7 +266,7 @@ mod tests {
 
     #[test]
     fn exclude_everything_yields_an_empty_list_not_an_error() {
-        let e = entries("M a.rs\nA b.rs\n");
+        let e = vec![m("a.rs"), a("b.rs")];
         let sel = Selection::Exclude(patterns(&["a.rs", "b.rs"]));
         let result = resolve_scope(&e, &sel).unwrap();
         assert!(result.is_empty());
@@ -247,7 +274,7 @@ mod tests {
 
     #[test]
     fn exclude_an_unmatched_entry_is_a_scope_error() {
-        let e = entries("M a.rs\n");
+        let e = vec![m("a.rs")];
         let sel = Selection::Exclude(patterns(&["typo.rs"]));
         assert!(resolve_scope(&e, &sel).is_err());
     }
@@ -256,7 +283,7 @@ mod tests {
 
     #[test]
     fn include_a_rename_by_its_old_name_contributes_the_new_name() {
-        let e = entries("R src/{old.rs => new.rs}\n");
+        let e = vec![r("src/old.rs", "src/new.rs")];
         let sel = Selection::Include(patterns(&["src/old.rs"]));
         let result = resolve_scope(&e, &sel).unwrap();
         assert_eq!(result, vec!["src/new.rs"]);
@@ -264,7 +291,7 @@ mod tests {
 
     #[test]
     fn include_a_rename_by_its_new_name_contributes_the_new_name() {
-        let e = entries("R src/{old.rs => new.rs}\n");
+        let e = vec![r("src/old.rs", "src/new.rs")];
         let sel = Selection::Include(patterns(&["src/new.rs"]));
         let result = resolve_scope(&e, &sel).unwrap();
         assert_eq!(result, vec!["src/new.rs"]);
@@ -272,7 +299,7 @@ mod tests {
 
     #[test]
     fn including_both_old_and_new_of_one_rename_still_contributes_new_once() {
-        let e = entries("R src/{old.rs => new.rs}\n");
+        let e = vec![r("src/old.rs", "src/new.rs")];
         let sel = Selection::Include(patterns(&["src/old.rs", "src/new.rs"]));
         let result = resolve_scope(&e, &sel).unwrap();
         assert_eq!(result, vec!["src/new.rs"]);
@@ -283,7 +310,7 @@ mod tests {
         // The copy's C line and the source's own M line are independent; naming the
         // source includes its own M line's contribution (the source itself), not just
         // the copy's <new> mapping.
-        let e = entries("C {orig.rs => copy.rs}\nM orig.rs\n");
+        let e = vec![c("orig.rs", "copy.rs"), m("orig.rs")];
         let sel = Selection::Include(patterns(&["orig.rs"]));
         let result = resolve_scope(&e, &sel).unwrap();
         assert_eq!(result, vec!["copy.rs", "orig.rs"]);
@@ -291,7 +318,7 @@ mod tests {
 
     #[test]
     fn excluding_the_new_name_of_a_copy_leaves_an_independent_source_edit_untouched() {
-        let e = entries("C {orig.rs => copy.rs}\nM orig.rs\n");
+        let e = vec![c("orig.rs", "copy.rs"), m("orig.rs")];
         let sel = Selection::Exclude(patterns(&["copy.rs"]));
         let result = resolve_scope(&e, &sel).unwrap();
         assert_eq!(result, vec!["orig.rs"]);
@@ -322,9 +349,7 @@ mod tests {
 
     #[test]
     fn a_directory_pattern_matches_a_rename_by_its_old_directory() {
-        // A file moved from old_dir/ to new_dir/: no shared leading path, so jj
-        // renders it with an empty prefix (`{<old> => <new>}`).
-        let e = entries("R {old_dir/a.rs => new_dir/a.rs}\n");
+        let e = vec![r("old_dir/a.rs", "new_dir/a.rs")];
         let sel = Selection::Include(patterns(&["old_dir"]));
         let result = resolve_scope(&e, &sel).unwrap();
         assert_eq!(result, vec!["new_dir/a.rs"]);

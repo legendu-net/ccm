@@ -22,9 +22,9 @@ pub struct DiffResult {
     pub files: Vec<String>,
 }
 
-/// Runs stage 6 to completion: for jj with `--include`/`--exclude`, first the `jj diff
-/// --summary` enumeration call, then scope resolution, then the final `git diff`/`jj
-/// diff` invocation.
+/// Runs stage 6 to completion: for jj with `--include`/`--exclude`, first the `jj diff`
+/// enumeration call, then scope resolution, then the final `git diff`/`jj diff`
+/// invocation.
 ///
 /// # Errors
 /// See the module-level docs: this can surface as exit 2, 7, or 8.
@@ -102,10 +102,10 @@ fn generate_jj(
 
     // A section break separates whatever progress lines led up to this point — the
     // interactive file picker's own trailing output (`fileselect.rs`) for
-    // `Selection::Explicit`, or nothing at all for `Include`/`Exclude` (the `jj diff
-    // --summary` enumeration call above isn't itself progress-logged) — from the
-    // diff-generation group about to start. Not needed for `Selection::All`, which has
-    // no lead-up of its own.
+    // `Selection::Explicit`, or nothing at all for `Include`/`Exclude` (the `jj diff`
+    // enumeration call above isn't itself progress-logged) — from the diff-generation
+    // group about to start. Not needed for `Selection::All`, which has no lead-up of
+    // its own.
     if !matches!(selection, scope::Selection::All) {
         let _ = progress::section_break(stderr);
     }
@@ -133,7 +133,7 @@ fn generate_jj(
 /// enumeration call to build the interactive file picker's candidate list, instead of
 /// duplicating it.
 pub(crate) fn enumerate_jj(cwd: &Path) -> Result<Vec<summary::SummaryEntry>, CcmError> {
-    let args = argv::jj_summary_args();
+    let args = argv::jj_enumerate_args();
     let captured = exec::run_simple("jj", args, cwd).map_err(DiffError::Enumeration)?;
     if !captured.success {
         return Err(DiffError::Enumeration(stderr_text(captured)).into());

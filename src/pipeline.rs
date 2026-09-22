@@ -1516,8 +1516,8 @@ mod tests {
         let mut stdin = std::io::Cursor::new(b"y\n".to_vec());
         let mut out = Vec::new();
         let mut stderr = Vec::new();
-        // Candidate order is first-seen from `jj diff --summary`, alphabetical here:
-        // index 0 is a.rs.
+        // Candidate order is first-seen from the jj diff enumeration call, alphabetical
+        // here: index 0 is a.rs.
         let fzf_picker = FakeFilesFzf(fzf::FzfMultiOutcome::Selected(vec![0]));
         let _ = run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &fzf_picker);
         let printed = String::from_utf8(stderr).unwrap();

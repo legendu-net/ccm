@@ -28,6 +28,8 @@ fn creates_both_files_in_a_fresh_directory_and_does_not_require_a_repo() {
     assert!(dir.join("api.yaml").is_file());
     let api = fs::read_to_string(dir.join("api.yaml")).unwrap();
     assert!(api.contains("name: OmniRoute"));
+    let prompts = fs::read_to_string(dir.join("prompts.yaml")).unwrap();
+    assert!(prompts.contains("detail:"));
 }
 
 #[test]

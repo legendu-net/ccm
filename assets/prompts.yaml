@@ -3,3 +3,7 @@ default:                       # key = prompt name, referenced from api.yaml's `
     You are an expert software engineer who writes clear, conventional commit messages.
   template: |                  # required; plain text, no placeholders
     Write a commit message for the following changes.
+
+detail:
+  template: |
+    Write a commit message for this diff. The first line of the message should be a concise summary of the change. List itemized changes in following lines if necessary. Output ONLY the message, without wrapping it in Markdown code fences or quotation marks.

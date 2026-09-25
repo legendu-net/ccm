@@ -180,6 +180,15 @@ impl Fixture {
         self
     }
 
+    /// Runs `jj new -m <message>`: snapshots the current working-copy state into `@`
+    /// (which becomes `@-`) and starts a fresh empty `@` on top. A checkpoint, so a
+    /// later working-copy edit (e.g. a rename) diffs against real prior content instead
+    /// of an empty parent.
+    pub fn jj_new(&self, message: &str) -> &Self {
+        self.jj(&["new", "-m", message]);
+        self
+    }
+
     /// Writes `body` to `<repo>/<rel>`, creating parent directories as needed.
     pub fn write(&self, rel: &str, body: &str) -> &Self {
         let path = self.repo_dir().join(rel);

@@ -123,9 +123,9 @@ fn build_args() -> Vec<String> {
     ]
 }
 
-/// Runs `fzf` over `lines` (`"<status>  <path>"` rows built from parsed
-/// `jj diff --summary` entries — see `fileselect.rs`) in multi-select mode (`--multi`,
-/// Tab to mark) with a live per-file diff preview, and reports what happened.
+/// Runs `fzf` over `lines` (`"<status>  <path>"` rows built from parsed jj diff
+/// enumeration entries — see `fileselect.rs`) in multi-select mode (`--multi`, Tab to
+/// mark) with a live per-file diff preview, and reports what happened.
 #[must_use]
 fn select_files(cwd: &Path, lines: &[String]) -> FzfMultiOutcome {
     let stdin_bytes = format!("{}\n", lines.join("\n")).into_bytes();

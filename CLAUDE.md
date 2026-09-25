@@ -103,15 +103,18 @@ justify it.
   deliberately avoids this module's `process_group(0)` isolation). Pumps
   stdin/stdout/stderr on separate threads to avoid a 64 KiB-pipe deadlock on a large diff;
   enforces `agent_cli`'s configured `timeout` via SIGTERM-then-SIGKILL.
-- `vcs/summary.rs` — parses `jj diff --summary` lines, including the `R prefix{old =>
-  new}` rename/copy brace form.
+- `vcs/summary.rs` — parses `argv::jj_enumerate_args`'s `-T` template output, one
+  `<status><SEP><source><SEP><target>` record per line. This replaced an earlier approach
+  that ran `jj diff --summary` and parsed its human-oriented `R prefix{old => new}`
+  rename/copy brace form, which turned out to be genuinely ambiguous (jj doesn't escape a
+  literal `{`/`}` a filename itself contains) — see the module doc for why.
 - `vcs/scope.rs` — resolves a `Selection` (`All` / `Include` / `Exclude` / `Explicit`)
   against parsed summary entries into the final file-argument list for `jj diff`/`jj
   commit`. A rename/copy is *matched* by either old or new name but always *contributes*
   the new name (old no longer exists to diff).
 - `vcs/pathnorm.rs` — purely lexical path normalization (no filesystem access) so
   `--include`/`--exclude`/the interactive file picker compare consistently against jj's
-  own `--summary` output.
+  enumeration output.
 
 ### `config/` — three-layer validation
 

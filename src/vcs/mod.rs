@@ -1,4 +1,4 @@
-//! git/jj subprocess interaction: argv construction, `jj diff --summary` parsing,
+//! git/jj subprocess interaction: argv construction, jj diff enumeration parsing,
 //! path normalization, and `--include`/`--exclude` scope resolution.
 
 pub mod argv;

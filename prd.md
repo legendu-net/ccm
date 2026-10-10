@@ -965,7 +965,7 @@ default:                       # key = prompt name, referenced from api.yaml's `
 
 detail:
   template: |
-    Write a commit message for this diff. The first line of the message should be a concise summary of the change. List itemized changes in following lines if necessary. Output ONLY the message, without wrapping it in Markdown code fences or quotation marks.
+    Write a commit message for this diff. The first line of the message should be a concise summary of the change. List itemized changes in following lines if necessary. If you include a bug reference, write it as `BUG=123456789` (the bare bug number), never `BUG=b/123456789`. Output ONLY the message, without wrapping it in Markdown code fences or quotation marks.
 ```
 
 Fields (per key):

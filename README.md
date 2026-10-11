@@ -3,7 +3,8 @@
 `ccm` generates a commit message from your current diff (via an OpenAI-compatible API
 or a local agent CLI), lets you regenerate, edit, or accept it, and commits it — for
 both Git and Jujutsu (jj) repositories, including colocated ones. See `prd.md` for the
-full normative specification this implementation follows.
+full normative specification this implementation follows, and `design.md` for the
+implementation design behind it.
 
 Supported platforms: Linux and macOS. Windows is out of scope.
 

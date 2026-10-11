@@ -6,7 +6,7 @@ which wraps command-line agent CLI to generate commit messages inside Neovim.
 The Lua script is ugly, hard to understand and not extensible.
 I'd like to reimplement the fundamental functionality of generating commit messages in Rust
 and make the Lua script a thin wrapper of it.
-This product design doc focuses on the rust implementation for generating commit messages.
+This product requirement doc focuses on the rust implementation for generating commit messages.
 The binary is named `ccm`, short for "Contextual Commit Message."
 
 ## Existing Tools
@@ -57,16 +57,8 @@ Supported platforms: Linux and macOS only. Windows is out of scope — no
 4. Allow the user to configure a list of tools/APIs to use via YAML (`api.yaml`, see Configuration).
     The command-line app selects the first `enabled` entry in the list — nothing more.
     There's no fallback and no probing of whether the entry will actually work: if it
-    fails, let it fail. (An earlier version of this design had `ccm` check each
-    entry's local "availability" — e.g. whether an `agent_cli`'s `command` resolves on
-    `$PATH` — before selecting it, skipping to the next `enabled` entry otherwise. That
-    mirrored the Lua script this replaces, where the same probing doubled as an
-    implicit fallback chain and, incidentally, as a way to auto-switch between
-    machine-specific tool profiles depending on what was installed locally. Neither
-    reason applies here: fallback is explicitly out of scope per this requirement, and
-    profile-switching is already handled directly by `api.yaml`/`prompts.yaml` being
-    real per-machine config files. So availability checking was dropped — see
-    Selection in Configuration.)
+    fails, let it fail. (See `design.md`, "Tool/API selection: no availability
+    probing", for why an earlier availability-probing design was dropped.)
     See Error Handling for how failures are reported.
 
     The user can also list what's configured (`--list-tools`) and choose the tool/API a
@@ -133,50 +125,26 @@ Binary name: `ccm`.
 
 ### Repository detection
 
-`ccm` determines the repository type by walking the directory tree itself, rather than
-shelling out to `git`/`jj` for detection — deliberately: requiring the *other* tool's
-binary to be installed just to determine which one applies would be backwards, and jj in
-particular is far less universally installed than git.
+`ccm` detects the repository type without requiring either the `git` or the `jj`
+binary to be installed: starting from the current working directory (symlinks resolved),
+it looks for a `.git` entry and a `.jj` entry in that directory and each of its
+ancestors. The nearest ancestor containing a `.git` entry is the git root, and,
+independently, the nearest one containing a `.jj` entry is the jj root.
 
-`ccm` canonicalizes the current working directory once (resolving symlinks), then walks
-upward through it and its ancestors toward the filesystem root, looking for a `.git` entry
-and a `.jj` entry directly inside each directory visited:
+- A `.git` file (a linked worktree or a submodule) counts the same as a `.git`
+    directory, so worktrees and submodules are detected like an ordinary repository.
+- A bare repository (no working tree) is never detected as a git repository, matching
+    `git rev-parse --show-toplevel`.
+- git's own ownership check (`safe.directory`) is not applied at this stage; the real
+    `git`/`jj` invocations later enforce it themselves.
 
-- A `.git` entry may be a directory (a normal repository) or a file containing a `gitdir:
-    <path>` pointer (a linked worktree or a submodule) — `ccm` only checks that *something*
-    named `.git` exists there, not that it's specifically a directory, so worktrees and
-    submodules are detected the same as an ordinary repository.
-- A `.jj` entry is checked for existence the same generic way, for the same robustness,
-    even though in current jj versions it's always a directory.
-- The walk tracks the git marker and the jj marker independently: the first (nearest to the
-    starting directory) ancestor containing a `.git` entry is the git root, and separately
-    the first ancestor containing a `.jj` entry is the jj root — a single directory can
-    supply both, one, or neither. The walk stops once both have been found, or once it
-    reaches the filesystem root having found only one or neither.
-- Because the starting directory was already canonicalized and each step up is a plain
-    parent-directory move on an already-resolved path, every root found this way is already
-    fully resolved — no separate canonicalization pass is needed before comparing them
-    (contrast with the two-independent-subprocess approach this replaces, which had to
-    canonicalize each tool's reported root separately before comparing).
-- A bare repository (no working tree — the repository root itself holds `HEAD`, `objects/`,
-    etc. directly, with no `.git` subdirectory) is therefore never detected as a git
-    repository by this walk. That matches `git rev-parse --show-toplevel`, which also fails
-    inside a bare repository, so this isn't a behavior change from the subprocess-based
-    approach it replaces.
-
-This intentionally does not replicate git's own ownership check (`safe.directory` /
-"detected dubious ownership") — a directory owned by another user is still detected as a
-git repository at this stage. That's fine: this walk only decides *which* codepath handles
-the directory; the actual `git`/`jj` subprocess invocations later (diff generation, commit)
-still shell out to the real binaries, which enforce that check themselves and fail normally
-if it isn't satisfied.
+See `design.md`, "Repository detection", for the exact algorithm and rationale.
 
 When both a git root and a jj root are found, `ccm` compares them:
 
 - If they're equal, the directory is genuinely colocated — jj handling by default, git
     handling if `--git` is passed (Requirement 1).
-- If they differ, one is necessarily an ancestor of the other, since both were found by
-    walking up from the same starting directory — the two can't be unrelated. `ccm` treats
+- If they differ, one is necessarily an ancestor of the other. `ccm` treats
     the *deeper* (more nested) root as the actual repository for this directory, and the
     shallower one as an unrelated outer repository that just happens to contain it:
     - git root is deeper — e.g. an independent git checkout nested inside a larger
@@ -308,7 +276,7 @@ Default mode can add a fourth stdin prompt — the tool picker (see "Selection")
 stage 5, before diff generation: whenever the automatic "first `enabled: true` entry"
 rule can't resolve to a single entry on its own (zero enabled, or 2+ enabled) and no
 non-empty `--tool <NAME>` was given. This prompt has two front-ends (see "Selection" and
-"Preferences of Dependencies" item 8) — `fzf` when it's on `$PATH`, stdin is a real
+`design.md`, "Preferences of Dependencies" item 8) — `fzf` when it's on `$PATH`, stdin is a real
 usable terminal, and `CCM_FUZZY` isn't `0`; a numbered stdin prompt otherwise — but the
 interactive-terminal requirement and the EOF/abort-cancels-with-exit-14 behavior are
 identical either way.
@@ -352,12 +320,8 @@ for `fzf` to be tried against on that path regardless.
 
 ### Diff generation
 
-`ccm` captures the diff by running the underlying tool as a subprocess with piped (not
-inherited) stdout, so the diff is never written to an actual terminal — this alone means
-git's and jj's color and pager logic (both default to `"auto"`, i.e. only active when
-stdout is a TTY) stay off. `ccm` additionally passes explicit flags as defense-in-depth
-against a user's global config forcing color/pager on regardless of TTY (e.g.
-`color.diff = always`):
+`ccm` runs git/jj as a subprocess and captures its output; the diff is never paged or
+colored regardless of the user's git/jj config (see `design.md`, "Diff generation"):
 
 - git: `git --no-pager diff --no-color --staged` (no file arguments — `--include`/
     `--exclude` aren't supported for git, see above). This means the user must `git add`
@@ -379,70 +343,29 @@ Diff scope resolution (jj only — `--include`/`--exclude` are a usage error und
 | absent | present | all working-copy files minus the excluded ones |
 | present | present | usage error — mutually exclusive |
 
-`jj diff` has no flag that means "these files minus these excluded ones", but jj's
-fileset language does support set difference directly (the `~` operator, e.g.
-`jj diff -- 'all() ~ file:"a.rs"'`; see `jj help -k filesets`). `ccm` doesn't use that
-route: a `file:` pattern that matches nothing (e.g. a typo'd path) is silently accepted
-by the fileset language rather than rejected, and `ccm` needs to surface a typo'd
-`--include`/`--exclude` path as a usage error (exit code 2, see below) instead of
-silently diffing an empty or unintended scope. So to resolve `--exclude` (and to
-validate both `--include` and `--exclude` paths per the rule below), `ccm` first
-enumerates the full set of changed paths in the jj working copy, one entry per changed
-file rather than a deduplicated set of bare strings (see the rename/copy handling below
-for why that distinction matters) — via `jj --no-pager diff --color=never -T
-<template>`, using the same color/pager-suppressing flags as "Diff generation" above
-since this output is parsed programmatically too. `<template>` is jj's own
-template-expression language (`jj help -k templates`), not a flag `ccm` invents: it
-renders one `<status-char><SEP><source-path><SEP><target-path>` record per line
-(`\n`-terminated, `SEP` the ASCII "unit separator" `\x1f`, chosen because no realistic
-path can ever contain it) built from `TreeDiffEntry`'s own `status_char`/`source`/
-`target` accessors — see `vcs::argv::ENUMERATE_TEMPLATE` for the exact expression. This
-enumeration call is a real subprocess invocation in its own right, distinct from the
-final `jj diff <files...>` call below, and can fail the same way a diff invocation can —
-e.g. `jj` not found, or erroring inside a jj repository for some other reason — which is
-reported the same way: exit code 7 (see Error Handling). It is not itself
-progress-logged (it runs fast enough, and often enough, that a dedicated pair of lines
-would just be noise) — only the `Generating diff using: <command>` line for the final
-synthesized command below (see Progress logging). `.display()` in the template reports
-each path relative to the current working directory, the same basis `--include`/
-`--exclude` are given in (see Flags above).
-
-`ccm` used to run `jj diff --summary` for this and parse its human-oriented output
-instead, where a rename/copy line shows `<old>`/`<new>` factored into a shared
-prefix/suffix with the differing middle in braces (e.g. `R src/{old.rs => new.rs}`).
-That notation turned out to be genuinely ambiguous to parse back in several real cases —
-jj does not escape a literal `{`/`}` a filename itself contains, so no amount of smarter
-brace-matching (bracket-depth tracking, then boundary-adjacency to a path separator)
-fully closed the gap; each fix in turn was defeated by a new real example, including one
-found in this very repository (a `.github/workflow/` → `.github/workflows/` rename).
-The template-based format sidesteps that whole class of problem rather than continuing
-to out-clever it: `SEP` can never appear in a path, so recovering `<status>`/`<old>`/
-`<new>` from a line is a plain three-way split, with no ambiguity to reason about at
-all.
+To resolve `--include`/`--exclude` (and to validate their paths per the rules below),
+`ccm` first enumerates the changed files in the jj working copy with a separate `jj
+--no-pager diff --color=never -T <template>` call (see `design.md`, "Diff scope
+resolution", for the template format and why jj's fileset `~` operator isn't used
+instead). This enumeration call can fail the same way a diff invocation can — e.g. `jj`
+not found, or erroring inside a jj repository for some other reason — which is reported
+the same way: exit code 7 (see Error Handling). It is not itself progress-logged — only
+the `Generating diff using: <command>` line for the final synthesized command below (see
+Progress logging). Enumerated paths are relative to the current working directory, the
+same basis `--include`/`--exclude` are given in (see Flags above).
 
 Known limitation, left unaddressed: the enumeration call and the final `jj diff
-<files...>` invocation below are two separate subprocess calls, so the working copy can
-change between them — e.g. a file included because it appeared in the enumeration could
-be reverted, or a new file could appear, before the diff itself actually runs. `ccm` does
-not re-enumerate or otherwise guard against this. This is the same class of
-time-of-check-to-time-of-use exposure already accepted for the (larger) gap between
-message generation/editing and the final commit — see the "Known limitation, left
-unaddressed" note under "Default behavior" — not a new risk specific to
-`--include`/`--exclude`.
+<files...>` invocation are two separate subprocess calls, so the working copy can
+change between them; `ccm` does not guard against this (see `design.md`, "Known
+limitation: enumeration vs. diff race").
 
-Before comparison, `ccm` lexically normalizes both the enumerated paths and the
-`--include`/`--exclude` paths the same way: each is split into `Path::components()`,
-any `CurDir` (`.`) component is dropped (a trailing separator, e.g. `src/`, produces no
-trailing empty component either, so it normalizes the same as `src`), and the
-remaining components are rejoined with a single `/` — so e.g. `./src/main.rs` and
-`src//main.rs` both normalize to `src/main.rs`, and a harmless difference in how the
-user spelled a path doesn't fail to match jj's own (already-clean) enumeration output
-and wrongly trip the unmatched-path usage error below. This is purely lexical — no
-filesystem access, no symlink resolution, and `..` components are left as-is rather
-than collapsed — so it normalizes spelling, not identity: a path that only resolves to
-the same file after resolving a symlink or a `..` segment (e.g.
-`--include ../repo/src/main.rs`) is still compared literally and can still trip the
-unmatched-path check.
+Before comparison, `ccm` normalizes the spelling of both the enumerated paths and the
+`--include`/`--exclude` paths: `.` components, repeated separators, and a trailing
+separator are ignored — so e.g. `./src/main.rs` and `src//main.rs` both match
+`src/main.rs`, and `src/` matches the same as `src`. This is purely lexical — symlinks
+and `..` components are not resolved — so a path that only refers to the same file
+after resolving a symlink or a `..` segment (e.g. `--include ../repo/src/main.rs`) is
+compared literally and can trip the unmatched-path check below.
 
 An `--include`/`--exclude` entry may name a directory as well as a single file — the
 same convention `jj split <dir>` already supports — in which case it matches every
@@ -451,13 +374,10 @@ direct children. Matching is component-wise, not a raw string prefix: normalized
 `E` matches normalized enumerated path `P` if `P` equals `E` exactly, or if `P`'s
 components begin with all of `E`'s components followed by at least one more — so
 `--include src` matches `src/main.rs` and `src/sub/mod.rs` but not `src-old/main.rs`
-(plain string prefixing would wrongly match that last one). `ccm` never checks the
-filesystem to decide whether an entry "is a directory" — there would be nothing to
-check if the directory itself, and everything under it, was deleted — so this
-component-wise rule against the enumerated paths is the entire mechanism; a bare file
-entry and a directory entry are resolved by the exact same rule, not two separate code
-paths. Each entry must match at least one enumerated path (exactly, or as a directory
-prefix) to be valid — one that matches zero paths (a typo'd file name, or a directory
+(plain string prefixing would wrongly match that last one). Whether an entry "is a
+directory" is never checked on the filesystem — a deleted directory still matches the
+deleted files that were under it. Each entry must match at least one enumerated path
+(exactly, or as a directory prefix) to be valid — one that matches zero paths (a typo'd file name, or a directory
 with no changed files under it) is the unmatched-path usage error described below.
 `--include` restricts the enumerated set to the union of paths matched by any entry;
 `--exclude` removes the union of paths matched by any entry from the enumerated set.
@@ -473,18 +393,10 @@ working copy — whether given as an exact file path or as a directory prefix �
 typo'd file name, or a directory containing no changed files) is a usage error (exit
 code 2), not silently ignored.
 
-A rename/copy record's `<source>` and `<target>` fields are simply `<old>` and `<new>` —
-jj's `TreeDiffEntry::source`/`::target` accessors report the true old/new path directly,
-with no shared-prefix/suffix factoring or brace notation to recover them from (that was
-a property of the old `--summary`-based text format's human-oriented rendering, not of
-the underlying data). For a plain modification/addition/deletion (`M`/`A`/`D`) record,
-`<source>` and `<target>` are simply identical — jj's template emits both fields
-unconditionally, not just for a rename/copy — so `ccm` discards `<source>` for those
-statuses rather than expose the redundant duplicate; only a rename/copy's independent
-`<old>` name is ever useful downstream (see below).
-
-`<old>` and `<new>` are matched by `--include`/`--exclude`
-against either name — using the same exact-match-or-directory-prefix rule described
+The enumeration produces one line per changed file, each with a status character (`M`
+modified, `A` added, `D` deleted, `R` renamed, `C` copied) and a path; a rename/copy line
+carries both an old path `<old>` and a new path `<new>`. Such a line is matched by `--include`/`--exclude` against
+either name — using the same exact-match-or-directory-prefix rule described
 above, so a directory entry covering `<old>` or `<new>` matches the line just as a bare
 file entry would — naming either path includes/excludes the line as a whole, contributing
 `<new>` (never `<old>`) to the resulting file-argument list: for a rename, `<old>` no
@@ -528,10 +440,10 @@ omission.
 
 Answering yes offers a picker over the enumerated files: `fzf` when it's on `$PATH`,
 stdin is a real usable terminal, and `CCM_FUZZY` isn't `0` (see Selection and
-"Preferences of Dependencies" item 8), or a numbered stdin prompt otherwise. Each
+`design.md`, "Preferences of Dependencies" item 8), or a numbered stdin prompt otherwise. Each
 candidate is shown as `<status>  <path>`
-(the same status character and `<target>` path the enumeration parsing already
-produces, never `<source>` — see the rename/copy handling above). The
+(the enumeration's status character and the file's path — for a rename/copy, its `<new>`
+path, never `<old>`; see the rename/copy handling above). The
 `fzf` front-end additionally previews the highlighted file's own diff in a side pane
 (`jj --no-pager diff --color=always -- <path>`), letting the choice be made by eye. Both
 front-ends allow marking any number of candidates before confirming — `fzf` via
@@ -543,17 +455,14 @@ exactly as a resolved `--include` would: passed as explicit file arguments to th
 `jj --no-pager diff --color=never <files...>` invocation, and threaded through unchanged
 to the jj commit-command picker afterward, which then offers `jj split` instead of `jj
 describe` (see "jj commit commands"). Marking every candidate is deliberately *not*
-treated the same as declining the prompt (an unrestricted `Selection::All`), even though
-the file set is the same at the moment of marking: `Selection::All` re-resolves to
+treated the same as declining the prompt (an unrestricted scope), even though the file
+set is the same at the moment of marking: an unrestricted scope re-resolves to
 whatever the working copy *currently* contains at each of the (separate, later) `jj
 diff`/`jj commit` invocations, whereas the marked list is fixed at the moment the picker
-closes. Since an interactive picker can leave the working copy open for arbitrarily
-long, a file that starts changing after enumeration — one the user was never shown and
-never chose — would otherwise be silently swept into the diff and the commit; pinning
-the exact enumerated paths instead means such a file is simply never included, no matter
-how long the run takes to finish. The cost is that "select everything" still triggers
-`jj split` rather than `jj describe` even though nothing was actually excluded — accepted
-as the price of not silently including an unseen file.
+closes, so a file that starts changing after enumeration — one the user was never shown
+— is never swept into the diff or the commit. As a consequence, "select everything"
+still offers `jj split` rather than `jj describe` (see `design.md`, "Interactive file
+selection: why "select everything" is not "decline"").
 
 Default behavior (no `--dry-run`): compute the diff, generate the commit message,
 open it in `$EDITOR` — always, even if generation came back blank — and after the user
@@ -570,9 +479,7 @@ The temp file is created directly in the OS temp directory (i.e. whatever
 `std::env::temp_dir()` resolves to — `$TMPDIR` if set, `/tmp` otherwise), never inside
 the git/jj repository, with a name starting
 with the prefix `CCM_EDITMSG_` followed by a randomized suffix for uniqueness (see
-"Preferences of Dependencies" for how this is generated) — not a timestamp: the file's
-own filesystem metadata (creation/modification time, e.g. via `stat` or `ls -t`) already
-carries that, so it isn't duplicated into the name. Once created — immediately before
+`design.md`, "Editor temp file and `$EDITOR` invocation"). Once created — immediately before
 invoking `$EDITOR` — `ccm` never deletes it, regardless of how the run ends: a
 successful commit (exit 0), an aborted editor (exit 13), a cancelled jj-command picker
 (exit 14), a blank cleaned message (exit 15), or any other later failure. This is
@@ -585,9 +492,8 @@ to the OS's own temp-directory conventions (e.g. `systemd-tmpfiles`, a reboot cl
 file is ever created (e.g. exit code 12, `$EDITOR` failing to resolve at all) naturally
 has nothing to leave behind.
 
-If creating the temp file fails (e.g. `tempfile::Builder::new().prefix("CCM_EDITMSG_")
-.tempfile_in(std::env::temp_dir())` erroring because the OS temp directory is
-unwritable or the disk is full — see "Preferences of Dependencies"), or if writing the
+If creating the temp file fails (e.g. because the OS temp directory is unwritable or the
+disk is full), or if writing the
 pre-populated content (see "Message pre-population and cleanup" below) into it fails
 partway through, that's a distinct failure from exit code 12: `$EDITOR`/fallback
 resolution may have already succeeded by this point, and the failure is in creating or
@@ -599,13 +505,13 @@ This only applies to the default editing flow —
 cleanup").
 
 `$EDITOR` commonly holds more than a bare program name (e.g. `EDITOR="code --wait"`,
-`EDITOR="emacsclient -t"`), so `ccm` splits its value into words using the `shell-words`
-crate's `shell_words::split()` (see "Preferences of Dependencies") — unquoted whitespace
+`EDITOR="emacsclient -t"`), so `ccm` splits its value into words POSIX-shell-style (see
+`design.md`, "Editor temp file and `$EDITOR` invocation") — unquoted whitespace
 separates words; a single- or double-quoted substring is one word with the quotes
 stripped, so a quoted path containing spaces isn't split apart; a backslash outside a
 single-quoted substring escapes the character that follows it (so e.g. `\ ` embeds a
-literal space in an otherwise-unquoted word) per that crate's rules. This is the same
-class of splitting `git` applies to `GIT_EDITOR`/`core.editor`. The first word is the
+literal space in an otherwise-unquoted word). This is the same class of splitting `git`
+applies to `GIT_EDITOR`/`core.editor`. The first word is the
 program; any remaining words are leading arguments
 passed to it before the temp file path, which `ccm` always appends last:
 `<program> <leading-args...> <tempfile>`. The "resolves to an executable" check for exit
@@ -838,12 +744,9 @@ pass, and the commit always covers the current stage as-is:
 |---|
 | `commit -m {{message}}` |
 
-Same argv-safety guarantee as "jj commit commands" below: `ccm` never builds a shell
-command line or passes this through `sh -c`; `{{message}}` is substituted as a single
-literal `Command::arg()` entry, so an unescaped multi-line commit message is passed
-through as-is with no shell quoting/escaping needed — the same reason `jj commit -m
-{{message}}` doesn't need `-F <path>` either, and why `ccm` doesn't need it for git
-either. No `--no-verify`: `git commit` runs with the repository's hooks exactly as it
+`{{message}}` is passed as a single literal argument, never through a shell, so a
+multi-line commit message is committed as-is (see `design.md`, "Subprocess argv
+safety"). No `--no-verify`: `git commit` runs with the repository's hooks exactly as it
 normally would (e.g. `pre-commit`, `commit-msg`) — `ccm` doesn't suppress or otherwise
 special-case them, the same as it doesn't for jj's own hooks. A failure here (including
 a hook rejecting the commit) is exit code 16, the same commit-invocation failure code jj's
@@ -863,19 +766,11 @@ command then acts on the whole working copy, jj's own default) — and `{{messag
 expands to the final commit message (as edited and saved, or as generated under
 `--dry-run`'s preview before it's discarded — `--dry-run` never actually runs these).
 
-The templates below read like shell strings for readability only. `ccm` never builds a
-shell command line or passes them through `sh -c`; each template is a fixed argv list,
-and `{{files}}`/`{{message}}` are substituted as literal `Command::arg()` entries — one
-argv slot per file, and the full (possibly multi-line) commit message as a single argv
-slot for `{{message}}`. This is what makes an unescaped multi-line message or a
-`--include`d path containing spaces or shell metacharacters safe to pass through as-is.
-A literal `--` argument precedes `{{files}}` in the `jj commit`/`jj split` templates so
-that a resolved path beginning with `-` (an unusual but valid filename) is still parsed
-by jj as a positional fileset argument rather than mistaken for an unrecognized flag —
-`--` marks the end of flag parsing the same way it does for any other clap-based CLI.
-This is harmless even when `{{files}}` expands to zero arguments: a trailing `--` with
-nothing after it is a no-op, so `jj commit`/`jj split` still act on the whole working
-copy exactly as when `--include`/`--exclude` weren't given.
+The templates below read like shell strings for readability only: each is a fixed
+argument list, with `{{files}}` expanding to one argument per file and `{{message}}` to a
+single argument, never passed through a shell — so a multi-line message or a path
+containing spaces, shell metacharacters, or a leading `-` is passed through safely (see
+`design.md`, "Subprocess argv safety", including why `--` precedes `{{files}}`).
 
 | Pick | Argument template |
 |---|---|
@@ -1092,10 +987,9 @@ jj's, whichever "Diff generation" produced) already makes clear where it starts.
     itself, or an interactive prompt of its own despite stdin already being closed once
     the prompt and diff are written (see `args` above) — which would otherwise hang
     forever, since Requirement 4 rules out a
-    fallback that could paper over it. On expiry, `ccm` sends `SIGTERM`, waits a
-    2-second grace period for the process to exit on its own, then sends `SIGKILL` if
-    it's still running; either way, this is reported as exit code 10 once the process
-    has actually been reaped, not while the grace period is still running.
+    fallback that could paper over it. On expiry, `ccm` terminates the process (`SIGTERM`,
+    then `SIGKILL` after a 2-second grace period — see `design.md`, "`agent_cli` timeout
+    enforcement") and reports exit code 10.
 
 ### Selection
 
@@ -1110,15 +1004,11 @@ and it doesn't matter whether the offending entry would otherwise have been enab
 `api.yaml` is a priority-ordered list. Absent a non-empty `--tool <NAME>` (below), `ccm`
 selects the first entry with `enabled: true` — nothing more — whenever that's
 unambiguous: under `--dry-run`, always (unless `--tool ''` forces the picker, below); in
-default mode, whenever exactly one entry is enabled. There is
-deliberately no local "availability" probe of any kind here (no checking that an
-`agent_cli`'s `command` resolves on `$PATH`, no reachability check for an `openai_api`'s
-`base_url`, no validation of `model` against either tool's own model list): Requirement 4
-rules out fallback entirely, so there is no second choice to fall back to even if such a
-probe found a problem — the only thing a probe could do is turn a selection-time failure
-(exit 6) into an earlier, differently-coded one, which isn't worth the added mechanism
-(see Requirement 4 for why an earlier design that *did* probe per-entry availability was
-dropped).
+default mode, whenever exactly one entry is enabled. There is no local "availability"
+probe of any kind here (no checking that an `agent_cli`'s `command` resolves on `$PATH`,
+no reachability check for an `openai_api`'s `base_url`, no validation of `model` against
+either tool's own model list) — see `design.md`, "Tool/API selection: no availability
+probing".
 
 `--tool <NAME>` (see CLI Interface) chooses the entry a different way for one run,
 without touching `api.yaml` itself — this is a per-invocation override, not a second
@@ -1148,7 +1038,7 @@ this prompt never appears under `--dry-run`, which always applies the first-enab
 regardless of how many entries are enabled; `--tool ''` is the one way to reach it under
 `--dry-run` too (see "Interactive terminal requirement").
 
-The tool picker has two front-ends over that one candidate list (see "Preferences of
+The tool picker has two front-ends over that one candidate list (see `design.md`, "Preferences of
 Dependencies" item 8): `fzf` (https://github.com/junegunn/fzf), shelled out to as a
 subprocess when it's found on `$PATH`, stdin is a real terminal, and the environment
 variable `CCM_FUZZY` is not set to `0`; and a plain numbered stdin prompt otherwise —
@@ -1323,113 +1213,8 @@ before 15 in the table.
 | 14 | Aborted — an interactive picker was cancelled (EOF before a valid selection, or — in the `fzf` front-end — an explicit abort): the tool picker at stage 5 — default mode, or any mode when `--tool ''` was given (see "Selection") — the interactive file picker between stage 5 and stage 6, default mode for a jj repository with no `--include`/`--exclude` (see "Interactive file selection") — or, at stage 8, the message review prompt (see "Message review prompt") or the jj-command picker (see "jj commit commands"). In the stage-8 cases, nothing is committed. |
 | 15 | Empty commit message — blank after the applicable check (see "Message pre-population and cleanup"): under `--dry-run`, the tool/API response — after the response-cleanup pass (see "Response cleanup") — is empty or all whitespace, checked immediately; otherwise, the `$EDITOR`-saved file is blank after cleanup, checked after `$EDITOR` closes, since the user may have written one in over a blank generation. |
 | 16 | Commit failed — `git commit` / `jj commit`\|`describe`\|`split` invocation failed |
-| 17 | Temp file creation/write failed — creating the `$EDITOR` temp file (e.g. `tempfile::Builder::new().prefix("CCM_EDITMSG_").tempfile_in(...)` erroring because the OS temp directory is unwritable or the disk is full) or writing the pre-populated content into it failed. Falls between exit codes 12 and 13 in the pipeline (see "Check order" above); listed here, out of numeric sequence, to avoid renumbering 13–16. |
+| 17 | Temp file creation/write failed — creating the `$EDITOR` temp file (e.g. the OS temp directory is unwritable or the disk is full) or writing the pre-populated content into it failed. Falls between exit codes 12 and 13 in the pipeline (see "Check order" above); listed here, out of numeric sequence, to avoid renumbering 13–16. |
 
-## Preferences of Dependencies    
+## Preferences of Dependencies
 
-1. I prefer the Rust crate https://crates.io/crates/litellm-rs
-    for making API calls, used as a plain client library (e.g. `litellm_rs::completion(...)`)
-    rather than its gateway/server functionality. Depend on it with
-    `default-features = false, features = ["lite"]` to avoid pulling in the
-    gateway/server-side dependency tree. `litellm-rs` is the Rust counterpart of the
-    widely-used Python `litellm` library — despite being a young crate, it's not an
-    immaturity risk on that basis.
-
-2. Use the `jj` and `git` command-line tools (invoked as subprocesses) for working with
-    jj and git repositories, rather than the `jj-lib` or `gitoxide` crates. The one
-    exception is repository *detection* itself, which walks the filesystem directly
-    instead of shelling out to either tool (see "Repository detection") — that's what lets
-    `ccm` tell git and jj repositories apart without requiring both binaries installed.
-
-3. The jj commit-command picker (see "jj commit commands") never offers more than two
-    choices at a time — `jj commit` plus either `jj describe` or `jj split`, never both
-    and never neither — so it doesn't warrant a fuzzy-finder crate like
-    https://crates.io/crates/skim. It's implemented as a plain single-keypress stdin
-    prompt (see "jj commit commands"), like the message review prompt, using only the
-    standard library. This reasoning is specific to prompts with a small, fixed choice
-    count: the jj commit-command picker here (never more than two) and the message review
-    prompt (item 7, three actions). It deliberately does *not* extend to the tool picker
-    (see "Selection"), whose candidate list is `api.yaml` itself and is therefore
-    open-ended — see item 8.
-
-4. Use the `clap` crate (https://crates.io/crates/clap), with the `derive` feature, for
-    parsing `ccm`'s own command-line arguments (see CLI Interface).
-
-5. Use the `shell-words` crate (https://crates.io/crates/shell-words), specifically
-    `shell_words::split()`, to word-split `$EDITOR`'s value (see "Default behavior" under
-    CLI Interface). It's a small, well-established implementation of POSIX-ish word
-    splitting with quote and backslash-escape handling, avoiding a hand-rolled parser for
-    something `ccm` doesn't otherwise need to reimplement.
-
-6. Use the `tempfile` crate (https://crates.io/crates/tempfile) to create the `$EDITOR`
-    temp file (see "Default behavior" under CLI Interface):
-    `tempfile::Builder::new().prefix("CCM_EDITMSG_").tempfile_in(std::env::temp_dir())`.
-    This gets `ccm` a collision-proof unique filename for free — `tempfile` appends its
-    own randomized suffix after the `CCM_EDITMSG_` prefix — without `ccm` having to hand-roll
-    uniqueness itself (e.g. via a timestamp or PID, both of which can collide across
-    near-simultaneous runs). Since the temp file must survive process exit unconditionally
-    (see "Default behavior"), `ccm` calls `.keep()` — or, if only the path is needed and
-    not an open `File` handle, `.into_temp_path().keep()` — immediately after creating
-    it. Either disarms `tempfile`'s delete-on-drop at the file's own already-generated
-    path, converting it from a delete-on-drop `NamedTempFile` into a plain, ordinary
-    file at that same path; `.persist(path)` isn't the right call here since that's for
-    moving the file to a *different* path than the one `tempfile` picked, which `ccm`
-    has no need to do. Every subsequent read/write against the file (writing the
-    initial pre-populated content, `$EDITOR` editing it, `ccm` reading it back) happens
-    through that same path like any other file, with no further involvement from
-    `tempfile`.
-
-7. The message review prompt and the jj commit-command picker (see "Message review
-    prompt", "jj commit commands") each read a single keypress on a real terminal, which
-    needs raw terminal mode (clearing `ICANON`/`ECHO` for the duration of that one read)
-    — both go through the same helper. Rather than a terminal-UI crate like
-    https://crates.io/crates/crossterm or https://crates.io/crates/console, `ccm` uses
-    the `term` feature of `nix` (https://crates.io/crates/nix, already a dependency —
-    see item 3's reasoning, which applies equally to these prompts' small fixed choice
-    counts; the open-ended tool picker is the one deliberate exception, item 8) to call
-    `tcgetattr`/`tcsetattr` directly. When stdin isn't a real terminal, the prompt falls
-    back to reading a whole line instead, so this dependency is only ever exercised on a
-    genuine interactive run.
-
-8. The tool picker (see "Selection") and the interactive file picker (see "Interactive
-    file selection") are the two deliberate exceptions to items 3 and 7's
-    reasoning against a fuzzy-finder/TUI crate: their candidate lists — `api.yaml`,
-    and the jj working copy's changed files — have no bounded size, so fuzzy search is a
-    genuine usability win once either grows large — unlike the jj commit-command picker or the message
-    review prompt, whose choice counts are small and fixed. Rather than embedding a
-    fuzzy-finder *library* (rejected in item 3 for the jj picker, and a poor fit here too
-    — evaluated and declined: https://crates.io/crates/skim pulls in an unconditional,
-    whole-process `#[global_allocator]` override and a native-code build step just to
-    link against it, regardless of which of its own Cargo features are enabled), `ccm`
-    shells out to the `fzf` command-line tool (https://github.com/junegunn/fzf) as an
-    optional subprocess, the same way it already shells out to `git`/`jj` themselves
-    (item 2) rather than embedding a library for those either. Concretely:
-    - For the tool picker: `ccm` writes the same candidate list `--list-tools` prints
-      to `fzf`'s stdin and reads the selected line back from its stdout — the standard
-      `command | fzf` idiom, just invoked directly rather than through a shell pipe.
-      For the file picker: `ccm` writes one `<status>  <path>` line per changed file
-      (`--multi`, so any number can be marked) and additionally sets `--preview=jj
-      --no-pager diff --color=always -- {2..}` so the highlighted file's own diff
-      renders live in a side pane — `{2..}` is `fzf`'s own placeholder for "every field
-      from the highlighted line from the 2nd column onward" (the leading status
-      character is column 1), substituted and shell-quoted by `fzf` itself before
-      being handed to `$SHELL -c`; this is the one place `ccm` puts a value into a
-      shell command line rather than a `Command::arg()`, unavoidable since `--preview`
-      is `fzf`'s only mechanism for it, but the command text is a fixed literal `ccm`
-      controls and the substituted value is always one of the paths `ccm` already
-      validated by enumerating the working copy, never arbitrary input. Either way,
-      `fzf`'s own interactive rendering and keyboard input go through `/dev/tty`
-      directly, independent of how `ccm` has wired its stdin/stdout/stderr.
-    - Both are only attempted when stdin is a real terminal (see "Interactive terminal
-      requirement") and `CCM_FUZZY` isn't set to `0` (an escape hatch for a terminal
-      that mishandles `fzf`'s inline TUI — see "Selection"); if `fzf` isn't found on
-      `$PATH`, doesn't have a controlling terminal available to it, or fails for any
-      other reason, `ccm` notes why on stderr and falls back to the numbered stdin
-      prompt each picker has always had — behavior is never worse than without
-      `fzf` installed.
-    - This adds no new dependency to `Cargo.toml` at all: `ccm` builds and runs
-      identically whether or not `fzf` happens to be on the user's machine, exactly
-      like its optional `nvim`/`vim`/`vi` `$EDITOR` fallback chain (see "Default
-      behavior") already works whether or not any of those happen to be installed.
-    - It's scoped to these two prompts. The jj commit-command picker and the message
-      review prompt are unaffected and stay exactly as items 3 and 7 describe.
+Moved to `design.md`, "Preferences of Dependencies" (items 1–8, same numbering).

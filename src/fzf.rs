@@ -24,6 +24,7 @@
 //! already does in `editor/mod.rs` — so it's part of the terminal's foreground group
 //! from the start and can read `/dev/tty` normally.
 
+use crate::vcs::argv::Revision;
 use crate::vcs::exec::{Captured, ExecError, owned_utf8_lossy};
 use std::io::Write;
 use std::path::Path;
@@ -77,8 +78,14 @@ pub trait Fzf {
     /// The multi-select front-end for the interactive diff-scope picker
     /// (`fileselect.rs`, prd.md "Diff scope resolution") — same shelling-out
     /// mechanism as [`Fzf::select`], but allows marking any number of candidates
-    /// (`--multi`) and previews each highlighted file's diff.
-    fn select_files(&self, cwd: &Path, lines: &[String]) -> FzfMultiOutcome;
+    /// (`--multi`) and previews each highlighted file's diff — in `revision`
+    /// (`--revision`'s value), or in the working copy when `None`.
+    fn select_files(
+        &self,
+        cwd: &Path,
+        revision: Option<Revision<'_>>,
+        lines: &[String],
+    ) -> FzfMultiOutcome;
 }
 
 /// Whether `$CCM_FUZZY` is set to exactly `0` — the escape hatch (prd.md "Selection")
@@ -98,8 +105,13 @@ impl Fzf for RealFzf {
         select(cwd, lines)
     }
 
-    fn select_files(&self, cwd: &Path, lines: &[String]) -> FzfMultiOutcome {
-        select_files(cwd, lines)
+    fn select_files(
+        &self,
+        cwd: &Path,
+        revision: Option<Revision<'_>>,
+        lines: &[String],
+    ) -> FzfMultiOutcome {
+        select_files(cwd, revision, lines)
     }
 }
 
@@ -111,7 +123,7 @@ impl Fzf for RealFzf {
 #[must_use]
 fn select(cwd: &Path, lines: &[String]) -> FzfOutcome {
     let stdin_bytes = format!("{}\n", lines.join("\n")).into_bytes();
-    interpret(spawn(cwd, &build_args(), stdin_bytes), lines)
+    interpret(spawn(cwd, &build_args(), &[], stdin_bytes), lines)
 }
 
 fn build_args() -> Vec<String> {
@@ -125,12 +137,25 @@ fn build_args() -> Vec<String> {
 
 /// Runs `fzf` over `lines` (`"<status>  <path>"` rows built from parsed jj diff
 /// enumeration entries — see `fileselect.rs`) in multi-select mode (`--multi`, Tab to
-/// mark) with a live per-file diff preview, and reports what happened.
+/// mark) with a live per-file diff preview, and reports what happened. `revision` is
+/// handed to the preview command through the [`PREVIEW_REVISION_ENV`] environment
+/// variable (see [`build_files_args`]).
 #[must_use]
-fn select_files(cwd: &Path, lines: &[String]) -> FzfMultiOutcome {
+fn select_files(cwd: &Path, revision: Option<Revision<'_>>, lines: &[String]) -> FzfMultiOutcome {
     let stdin_bytes = format!("{}\n", lines.join("\n")).into_bytes();
-    interpret_multi(spawn(cwd, &build_files_args(), stdin_bytes), lines)
+    let envs: Vec<(&str, &str)> = revision
+        .map(|revision| (PREVIEW_REVISION_ENV, revision.revset))
+        .into_iter()
+        .collect();
+    interpret_multi(
+        spawn(cwd, &build_files_args(revision), &envs, stdin_bytes),
+        lines,
+    )
 }
+
+/// The environment variable [`select_files`] sets on the `fzf` process to carry
+/// `--revision`'s value into the preview command (see [`build_files_args`]).
+const PREVIEW_REVISION_ENV: &str = "CCM_PREVIEW_REVISION";
 
 /// Args for the file picker's `fzf` invocation. `--preview` runs
 /// `jj --no-pager diff --color=always -- {2..}` (`--color=always` rather than the
@@ -145,7 +170,28 @@ fn select_files(cwd: &Path, lines: &[String]) -> FzfMultiOutcome {
 /// text itself is a fixed literal we control; the only variable part is fzf's own
 /// quoted substitution of the currently-highlighted candidate's already-validated
 /// path (never arbitrary user input).
-fn build_files_args() -> Vec<String> {
+///
+/// With `--revision`, the preview also passes `-r "$CCM_PREVIEW_REVISION"` — the
+/// revset is user input, so rather than splicing it into the command text (and getting
+/// the quoting right for whatever `$SHELL` `fzf` runs the preview under — `sh` and
+/// `fish` disagree on backslashes inside single quotes), it's passed through the
+/// environment and referenced as a double-quoted variable, which expands to exactly one
+/// word, unexamined, under POSIX shells and fish alike. When that revision isn't the
+/// working copy, the preview also passes `--ignore-working-copy` (see
+/// `argv::jj_read_prefix`).
+fn build_files_args(revision: Option<Revision<'_>>) -> Vec<String> {
+    let preview = if let Some(revision) = revision {
+        let ignore_working_copy = if revision.is_working_copy {
+            ""
+        } else {
+            " --ignore-working-copy"
+        };
+        format!(
+            "--preview=jj --no-pager{ignore_working_copy} diff --color=always -r \"${PREVIEW_REVISION_ENV}\" -- {{2..}}"
+        )
+    } else {
+        "--preview=jj --no-pager diff --color=always -- {2..}".to_string()
+    };
     vec![
         "--prompt=Select files> ".to_string(),
         "--multi".to_string(),
@@ -155,7 +201,7 @@ fn build_files_args() -> Vec<String> {
         "--height=90%".to_string(),
         "--layout=reverse".to_string(),
         "--header=Tab to mark, Enter to confirm".to_string(),
-        "--preview=jj --no-pager diff --color=always -- {2..}".to_string(),
+        preview,
         "--preview-window=right,70%,wrap".to_string(),
     ]
 }
@@ -168,9 +214,15 @@ fn build_files_args() -> Vec<String> {
 /// on a full pipe buffer regardless of candidate-list size — the same hazard
 /// `vcs::exec`'s own module doc describes for large diffs, just avoided by a smaller,
 /// dedicated mechanism here rather than reusing that one.
-fn spawn(cwd: &Path, args: &[String], stdin_bytes: Vec<u8>) -> Result<Captured, ExecError> {
+fn spawn(
+    cwd: &Path,
+    args: &[String],
+    envs: &[(&str, &str)],
+    stdin_bytes: Vec<u8>,
+) -> Result<Captured, ExecError> {
     let mut child = Command::new("fzf")
         .args(args)
+        .envs(envs.iter().copied())
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -413,9 +465,29 @@ mod tests {
 
     #[test]
     fn build_files_args_requests_multi_select_and_a_diff_preview() {
-        let args = build_files_args();
+        let args = build_files_args(None);
         assert!(args.contains(&"--multi".to_string()));
         assert!(args.contains(&"--preview=jj --no-pager diff --color=always -- {2..}".to_string()));
+    }
+
+    #[test]
+    fn build_files_args_with_a_revision_previews_it_via_the_environment() {
+        let args = build_files_args(Some(Revision {
+            revset: "@-",
+            is_working_copy: false,
+        }));
+        assert!(args.contains(
+            &"--preview=jj --no-pager --ignore-working-copy diff --color=always -r \"$CCM_PREVIEW_REVISION\" -- {2..}"
+                .to_string()
+        ));
+        let args = build_files_args(Some(Revision {
+            revset: "@",
+            is_working_copy: true,
+        }));
+        assert!(args.contains(
+            &"--preview=jj --no-pager diff --color=always -r \"$CCM_PREVIEW_REVISION\" -- {2..}"
+                .to_string()
+        ));
     }
 
     #[test]
@@ -514,7 +586,7 @@ mod tests {
         if std::fs::File::open("/dev/tty").is_ok() {
             return;
         }
-        let outcome = select_files(&std::env::current_dir().unwrap(), &file_lines());
+        let outcome = select_files(&std::env::current_dir().unwrap(), None, &file_lines());
         assert!(matches!(outcome, FzfMultiOutcome::Unavailable(_)));
     }
 }

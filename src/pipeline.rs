@@ -6,8 +6,8 @@
 //!
 //! This now covers the full spec: stage 1 (argument shape), the `--gen-config` and
 //! `--list-tools` short-circuits, stage 2 (repository detection), stage 3
-//! (repo-dependent argument validation), stage 4 (config load & validation), stage 5
-//! (tool/API selection — an explicit `--tool <NAME>`, or the first enabled entry, or, in
+//! (repo-dependent argument validation, including the jj `--revision` check), stage 4
+//! (config load & validation), stage 5 (tool/API selection — an explicit `--tool <NAME>`, or the first enabled entry, or, in
 //! default mode with an ambiguous choice, a tool-picker prompt), stage 6 (diff
 //! generation — preceded, in default mode for a jj repository with no
 //! `--include`/`--exclude` already given, by the interactive file picker,
@@ -111,6 +111,17 @@ pub fn run_with(
     {
         return Err(UsageError::IncludeExcludeUnderGit.into());
     }
+    if matches!(handling, RepoHandling::Git { .. }) && cli.revision.is_some() {
+        return Err(UsageError::RevisionUnderGit.into());
+    }
+    // Under jj, `--revision` must resolve to exactly one mutable revision. Checked
+    // here, before the tool picker (stage 5) and the file picker (stage 6), so a bad
+    // revset never costs the user a prompt.
+    let revision = cli
+        .revision
+        .as_deref()
+        .map(|revision| diff::check_revision(revision, &cwd))
+        .transpose()?;
 
     // Stage 4: config load & validation.
     let config_dir = paths::resolve_config_dir_from(cli.config.as_deref(), &cwd, env);
@@ -190,10 +201,17 @@ pub fn run_with(
         // `raw` is always true here — the `env.stdin_is_terminal()` guard above is
         // exactly what `raw` means for every other picker in this pipeline (see the
         // stage-8 `let raw = env.stdin_is_terminal();` below).
-        selection =
-            fileselect::resolve_interactively(&cwd, stdin, stderr, fzf_picker, fzf_enabled, true)?;
+        selection = fileselect::resolve_interactively(
+            &cwd,
+            revision,
+            stdin,
+            stderr,
+            fzf_picker,
+            fzf_enabled,
+            true,
+        )?;
     }
-    let diff_result = diff::generate(&handling, &selection, &cwd, stderr)?;
+    let diff_result = diff::generate(&handling, &selection, revision, &cwd, stderr)?;
 
     // Stage 7: message generation.
     let message = generation::generate(
@@ -269,6 +287,7 @@ pub fn run_with(
         &handling,
         &final_message,
         &diff_result.files,
+        revision,
         &cwd,
         stdin,
         stderr,
@@ -281,6 +300,7 @@ pub fn run_with(
 mod tests {
     use super::*;
     use crate::env::FakeEnvironment;
+    use crate::vcs::argv::Revision;
     use std::path::PathBuf;
 
     fn base_cli() -> Cli {
@@ -293,6 +313,7 @@ mod tests {
             gen_config: false,
             list_tools: false,
             tool: None,
+            revision: None,
         }
     }
 
@@ -777,7 +798,12 @@ mod tests {
         // Every test using `FakeFzf` selects a tool over a git repo, which never
         // reaches the (jj-only) interactive file picker — see `fileselect_gating`
         // below for the double used there instead.
-        fn select_files(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfMultiOutcome {
+        fn select_files(
+            &self,
+            _cwd: &std::path::Path,
+            _revision: Option<Revision<'_>>,
+            _lines: &[String],
+        ) -> fzf::FzfMultiOutcome {
             panic!("select_files should not have been invoked in this test");
         }
     }
@@ -791,7 +817,12 @@ mod tests {
         fn select(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfOutcome {
             panic!("fzf should not have been invoked in this test");
         }
-        fn select_files(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfMultiOutcome {
+        fn select_files(
+            &self,
+            _cwd: &std::path::Path,
+            _revision: Option<Revision<'_>>,
+            _lines: &[String],
+        ) -> fzf::FzfMultiOutcome {
             panic!("fzf should not have been invoked in this test");
         }
     }
@@ -805,7 +836,12 @@ mod tests {
             *self.received.borrow_mut() = Some(lines.to_vec());
             self.outcome.clone()
         }
-        fn select_files(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfMultiOutcome {
+        fn select_files(
+            &self,
+            _cwd: &std::path::Path,
+            _revision: Option<Revision<'_>>,
+            _lines: &[String],
+        ) -> fzf::FzfMultiOutcome {
             panic!("select_files should not have been invoked in this test");
         }
     }
@@ -818,7 +854,12 @@ mod tests {
         fn select(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfOutcome {
             panic!("select should not have been invoked in this test");
         }
-        fn select_files(&self, _cwd: &std::path::Path, _lines: &[String]) -> fzf::FzfMultiOutcome {
+        fn select_files(
+            &self,
+            _cwd: &std::path::Path,
+            _revision: Option<Revision<'_>>,
+            _lines: &[String],
+        ) -> fzf::FzfMultiOutcome {
             self.0.clone()
         }
     }
@@ -1260,6 +1301,28 @@ mod tests {
             .status()
             .unwrap();
         (tmp, repo)
+    }
+
+    #[test]
+    fn a_bad_revision_fails_before_the_tool_picker() {
+        // Two enabled entries on a terminal would normally reach the tool picker
+        // (stage 5); an unknown revset must fail at stage 3 (exit 7) before that.
+        let (_tmp, repo) = jj_repo();
+        let config_dir = repo.parent().unwrap().join("config");
+        write_two_enabled_entry_config(&config_dir);
+        let env = FakeEnvironment {
+            cwd: repo,
+            ..FakeEnvironment::new().with_stdin_is_terminal(true)
+        };
+        let mut cli = base_cli();
+        cli.config = Some(config_dir);
+        cli.revision = Some("no_such_bookmark_xyz".to_string());
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let mut stderr = Vec::new();
+        let err =
+            run_with(&cli, &env, &mut stdin, &mut out, &mut stderr, &PanickingFzf).unwrap_err();
+        assert_eq!(err.exit_code().as_u8(), 7);
     }
 
     #[test]

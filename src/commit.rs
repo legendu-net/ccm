@@ -8,7 +8,7 @@ use crate::error::{CcmError, CommitError};
 use crate::picker;
 use crate::progress;
 use crate::repo::RepoHandling;
-use crate::vcs::argv;
+use crate::vcs::argv::{self, Revision};
 use crate::vcs::exec;
 use std::io::BufRead;
 use std::path::Path;
@@ -20,12 +20,23 @@ use std::path::Path;
 /// describe` (unscoped) is offered. `raw` is forwarded to the jj commit-command picker:
 /// `true` (a real terminal) makes it a single-keypress prompt (see [`picker::prompt_commit`]).
 ///
+/// `revision` is `--revision`'s value (jj only). `jj commit` only ever acts on the
+/// working copy, so with a revision there's just one applicable command — `jj split -r`
+/// when scoped, `jj describe -r` otherwise — and the picker is skipped entirely, the
+/// same "nothing to choose, don't ask" rule the interactive file picker applies to a
+/// single changed file (prd.md "jj commit commands").
+///
 /// # Errors
 /// [`crate::error::PickerCancelled`] (exit 14, jj only) or [`CommitError`] (exit 16).
+// Every argument is an independent input injected from `pipeline::run_with` (the
+// stdin/stderr seams in particular can't be bundled with the rest without obscuring
+// what the tests substitute), so a parameter struct would only rename the problem.
+#[allow(clippy::too_many_arguments)]
 pub fn commit(
     handling: &RepoHandling,
     message: &str,
     files: &[String],
+    revision: Option<Revision<'_>>,
     cwd: &Path,
     stdin: &mut dyn BufRead,
     stderr: &mut dyn std::io::Write,
@@ -33,7 +44,7 @@ pub fn commit(
 ) -> Result<(), CcmError> {
     match handling {
         RepoHandling::Git { .. } => commit_git(message, cwd, stderr),
-        RepoHandling::Jj { .. } => commit_jj(message, files, cwd, stdin, stderr, raw),
+        RepoHandling::Jj { .. } => commit_jj(message, files, revision, cwd, stdin, stderr, raw),
     }
 }
 
@@ -53,6 +64,7 @@ fn commit_git(message: &str, cwd: &Path, stderr: &mut dyn std::io::Write) -> Res
 fn commit_jj(
     message: &str,
     files: &[String],
+    revision: Option<Revision<'_>>,
     cwd: &Path,
     stdin: &mut dyn BufRead,
     stderr: &mut dyn std::io::Write,
@@ -63,16 +75,20 @@ fn commit_jj(
     // diff::generate, and `--include` never resolves to an empty list (every pattern
     // is required to have matched at least one line).
     let scoped = !files.is_empty();
-    let choices = picker::choices(scoped);
-    // `jj commit` is always index 0 (see `choices`' own doc comment), so it's the
-    // picker's default: a space or Enter selects it without the user typing `c`. `raw`
-    // (a real terminal — see pipeline::run) makes it a single-keypress prompt, exactly
-    // like the message review prompt that precedes it.
-    let picked =
-        picker::prompt_commit(stdin, stderr, &choices, raw).map_err(picker::to_ccm_error)?;
-    let _ = progress::section_break(stderr);
-
-    let args = argv::jj_commit_command_args(picked, message, files);
+    let args = if let Some(revision) = revision {
+        // Only one applicable command — see `commit`'s doc comment.
+        argv::jj_revision_command_args(revision, message, files)
+    } else {
+        let choices = picker::choices(scoped);
+        // `jj commit` is always index 0 (see `choices`' own doc comment), so it's the
+        // picker's default: a space or Enter selects it without the user typing `c`.
+        // `raw` (a real terminal — see pipeline::run) makes it a single-keypress
+        // prompt, exactly like the message review prompt that precedes it.
+        let picked =
+            picker::prompt_commit(stdin, stderr, &choices, raw).map_err(picker::to_ccm_error)?;
+        let _ = progress::section_break(stderr);
+        argv::jj_commit_command_args(picked, message, files)
+    };
     let command = argv::render_command("jj", &args);
 
     let captured = exec::run_simple("jj", args, cwd).map_err(CommitError)?;
@@ -87,6 +103,7 @@ fn commit_jj(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{PARENT, jj_log, jj_new};
     use std::io::Cursor;
 
     fn git_repo() -> tempfile::TempDir {
@@ -144,6 +161,7 @@ mod tests {
             &handling,
             "feat: add a",
             &[],
+            None,
             repo.path(),
             &mut stdin,
             &mut stderr,
@@ -172,6 +190,7 @@ mod tests {
             &handling,
             "feat: x",
             &[],
+            None,
             repo.path(),
             &mut stdin,
             &mut stderr,
@@ -192,6 +211,7 @@ mod tests {
             &handling,
             "feat: x",
             &[],
+            None,
             &repo,
             &mut stdin,
             &mut stderr,
@@ -213,6 +233,7 @@ mod tests {
             &handling,
             "feat: x",
             &["a.txt".to_string()],
+            None,
             &repo,
             &mut stdin,
             &mut stderr,
@@ -234,6 +255,7 @@ mod tests {
             &handling,
             "feat: x",
             &[],
+            None,
             &repo,
             &mut stdin,
             &mut stderr,
@@ -257,6 +279,7 @@ mod tests {
             &handling,
             "feat: x",
             &[],
+            None,
             tmp.path(),
             &mut stdin,
             &mut stderr,
@@ -264,5 +287,65 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.exit_code().as_u8(), 16);
+    }
+
+    #[test]
+    fn jj_revision_unscoped_describes_that_revision_without_a_picker() {
+        let (tmp, repo) = jj_repo();
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        jj_new(&tmp, &repo);
+        let handling = RepoHandling::Jj { root: repo.clone() };
+        // No stdin at all: a picker would see EOF and cancel (exit 14).
+        let mut stdin = Cursor::new(Vec::new());
+        let mut stderr = Vec::new();
+        commit(
+            &handling,
+            "feat: describe parent",
+            &[],
+            Some(PARENT),
+            &repo,
+            &mut stdin,
+            &mut stderr,
+            false,
+        )
+        .unwrap();
+        let logged = String::from_utf8(stderr).unwrap();
+        assert!(!logged.contains("Which jj command to use?"));
+        assert!(logged.contains("Committed using: jj describe -m 'feat: describe parent' -r @-"));
+        assert_eq!(
+            jj_log(&tmp, &repo, "@-", "description").trim(),
+            "feat: describe parent"
+        );
+        assert_eq!(jj_log(&tmp, &repo, "@", "description").trim(), "");
+    }
+
+    #[test]
+    fn jj_revision_scoped_splits_that_revision_without_a_picker() {
+        let (tmp, repo) = jj_repo();
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "world\n").unwrap();
+        jj_new(&tmp, &repo);
+        let handling = RepoHandling::Jj { root: repo.clone() };
+        let mut stdin = Cursor::new(Vec::new());
+        let mut stderr = Vec::new();
+        commit(
+            &handling,
+            "feat: add a",
+            &["a.txt".to_string()],
+            Some(PARENT),
+            &repo,
+            &mut stdin,
+            &mut stderr,
+            false,
+        )
+        .unwrap();
+        let logged = String::from_utf8(stderr).unwrap();
+        assert!(!logged.contains("Which jj command to use?"));
+        assert!(logged.contains("Committed using: jj split -m 'feat: add a' -r @- -- a.txt"));
+        // The selected half (a.txt) keeps the message; the remainder (b.txt) is now @-.
+        assert_eq!(
+            jj_log(&tmp, &repo, "@--", "description").trim(),
+            "feat: add a"
+        );
     }
 }

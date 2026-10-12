@@ -46,6 +46,12 @@ to choose how to record it:
 `--include`/`--exclude`, `[S]plit` (`jj split`) replaces `[D]escribe`. Same
 keypress-on-a-terminal / line-at-a-time-when-piped behavior as the review prompt.
 
+With `-r`/`--revision <REVSET>`, `ccm` generates the message from that revision's diff
+instead of the working copy's (e.g. `ccm -r @-`). `jj commit` only ever applies to the
+working copy, so there's nothing to choose and this prompt is skipped: the message is
+recorded with `jj describe -r <REVSET>`, or `jj split -r <REVSET>` with
+`--include`/`--exclude`. The revset must resolve to exactly one mutable revision.
+
 ## Configuration
 
 Config directory: `$XDG_CONFIG_HOME/ccm/` if set to a non-empty value, otherwise
@@ -82,6 +88,7 @@ any of those happen to be installed.
 |---|---|
 | `--include <FILE\|DIR>...` | Restrict the diff to these paths (jj only). |
 | `--exclude <FILE\|DIR>...` | Exclude these paths from the diff (jj only). |
+| `-r`, `--revision <REVSET>` | Generate the message from (and describe/split) this revision instead of the working copy (jj only; must resolve to exactly one mutable revision). |
 | `--git` | Force git handling in a colocated (git + jj) repository. |
 | `-d`, `--dry-run` | Print the generated message to stdout; don't open `$EDITOR` or commit. |
 | `-c`, `--config <DIR>` | Use `<DIR>` as the config directory instead of the default. |
@@ -105,8 +112,8 @@ earliest-listed stage below wins.
 | 4 | Not a git or jj repository |
 | 5 | Config error — `api.yaml`/`prompts.yaml` missing, unreadable, malformed, or fails cross-validation |
 | 6 | Tool/API selection failed — under `--dry-run` with no `--tool`, every `api.yaml` entry is disabled (default mode instead prompts in this case), or a non-empty `--tool <NAME>` matched no entry |
-| 7 | Diff generation failed — the underlying `git diff`/`jj diff` (or jj's enumeration call) itself errored |
-| 8 | Nothing to diff — no staged changes (git), or an empty scope after `--include`/`--exclude` (jj) |
+| 7 | Diff generation failed — the underlying `git diff`/`jj diff` (or jj's enumeration or `--revision` resolution call) itself errored |
+| 8 | Nothing to diff — no staged changes (git), or an empty diff/scope after `--include`/`--exclude` (jj) |
 | 9 | API key resolution failed |
 | 10 | Tool/API call failed — network error, timeout, non-zero exit, or an API-level error response |
 | 11 | Malformed response (`openai_api` only) |

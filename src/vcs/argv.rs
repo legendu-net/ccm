@@ -38,22 +38,84 @@ pub const ENUMERATE_FIELD_SEP: char = '\u{1f}';
 const ENUMERATE_TEMPLATE: &str = "status_char ++ \"\\x1f\" ++ source.path().display() \
      ++ \"\\x1f\" ++ target.path().display() ++ \"\\n\"";
 
-/// `jj --no-pager diff --color=never -T <template>` — the working-copy file enumeration
-/// call, only used when `--include`/`--exclude` was given (or the interactive file
-/// picker needs the candidate list). See [`ENUMERATE_TEMPLATE`]/[`ENUMERATE_FIELD_SEP`].
+/// `--revision`'s value once `diff::check_revision` has accepted it: the revset as the
+/// user typed it, plus whether it resolves to the working-copy revision (`@`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Revision<'a> {
+    pub revset: &'a str,
+    pub is_working_copy: bool,
+}
+
+/// `jj --no-pager --ignore-working-copy log --no-graph --color=never --limit 2 -r
+/// <revision> -T <template>` — the `--revision` check (prd.md "Diff generation"):
+/// prints one commit id per line for the revisions `revision` resolves to. `--limit 2`
+/// because the only question asked of the output is "exactly one, or not" — there's no
+/// point printing an arbitrarily large revset (e.g. `all()`) in full just to reject it.
+/// `--ignore-working-copy` because nothing the check reports depends on a fresh
+/// working-copy snapshot (see [`jj_read_prefix`]).
 #[must_use]
-pub fn jj_enumerate_args() -> Vec<String> {
-    let mut args = strs(&["--no-pager", "diff", "--color=never", "-T"]);
+pub fn jj_revision_check_args(revision: &str) -> Vec<String> {
+    let mut args = strs(&[
+        "--no-pager",
+        "--ignore-working-copy",
+        "log",
+        "--no-graph",
+        "--color=never",
+        "--limit",
+        "2",
+        "-r",
+    ]);
+    args.push(revision.to_string());
+    args.push("-T".to_string());
+    args.push(REVISION_CHECK_TEMPLATE.to_string());
+    args
+}
+
+/// jj template-language source for [`jj_revision_check_args`]'s `-T` flag: one line per
+/// revision, its commit id, whether it's immutable and whether it's the working-copy
+/// revision (`true`/`false` each), space-separated.
+const REVISION_CHECK_TEMPLATE: &str =
+    "commit_id ++ \" \" ++ immutable ++ \" \" ++ current_working_copy ++ \"\\n\"";
+
+/// `--no-pager`, plus `--ignore-working-copy` when `revision` is a revision other than
+/// the working copy. Every jj command snapshots the working copy first by default, which
+/// can record a new operation — concurrent with an outer `jj split`/`jj describe` whose
+/// editor session is running `ccm` (the Neovim wrapper). A non-working-copy revision's
+/// diff doesn't depend on that snapshot, so the read-only `jj diff` calls skip it there.
+fn jj_read_prefix(revision: Option<Revision<'_>>) -> Vec<String> {
+    let mut args = strs(&["--no-pager"]);
+    if revision.is_some_and(|revision| !revision.is_working_copy) {
+        args.push("--ignore-working-copy".to_string());
+    }
+    args
+}
+
+/// `jj --no-pager [--ignore-working-copy] diff --color=never [-r <revision>] -T
+/// <template>` — the changed-file
+/// enumeration call, only used when `--include`/`--exclude` was given (or the
+/// interactive file picker needs the candidate list). `revision` is `--revision`'s
+/// value, if given; `None` enumerates the working copy. See
+/// [`ENUMERATE_TEMPLATE`]/[`ENUMERATE_FIELD_SEP`] and [`jj_read_prefix`].
+#[must_use]
+pub fn jj_enumerate_args(revision: Option<Revision<'_>>) -> Vec<String> {
+    let mut args = jj_read_prefix(revision);
+    args.extend(strs(&["diff", "--color=never"]));
+    push_revision(&mut args, revision.map(|revision| revision.revset));
+    args.push("-T".to_string());
     args.push(ENUMERATE_TEMPLATE.to_string());
     args
 }
 
-/// `jj --no-pager diff --color=never <files...>`. `files` is empty when neither
-/// `--include` nor `--exclude` was given, in which case this diffs the whole working
-/// copy exactly as `jj diff` would with no arguments.
+/// `jj --no-pager [--ignore-working-copy] diff --color=never [-r <revision>]
+/// <files...>`. `files` is empty when neither `--include` nor `--exclude` was given, in
+/// which case this diffs the whole revision (the working copy when `revision` is `None`)
+/// exactly as `jj diff [-r <revision>]` would with no file arguments. See
+/// [`jj_read_prefix`].
 #[must_use]
-pub fn jj_diff_args(files: &[String]) -> Vec<String> {
-    let mut args = strs(&["--no-pager", "diff", "--color=never"]);
+pub fn jj_diff_args(revision: Option<Revision<'_>>, files: &[String]) -> Vec<String> {
+    let mut args = jj_read_prefix(revision);
+    args.extend(strs(&["diff", "--color=never"]));
+    push_revision(&mut args, revision.map(|revision| revision.revset));
     args.extend(files.iter().cloned());
     args
 }
@@ -70,7 +132,8 @@ pub enum JjCommitCommand {
 /// `{{files}}` slot), or `jj split -m {{message}} -- {{files}}`. A literal `--`
 /// precedes `{{files}}` for `commit`/`split` so a resolved path beginning with `-` is
 /// still parsed as a positional fileset argument — harmless even when `files` is
-/// empty, in which case it's a no-op trailing `--`.
+/// empty, in which case it's a no-op trailing `--`. See [`jj_revision_command_args`]
+/// under `--revision`.
 #[must_use]
 pub fn jj_commit_command_args(
     cmd: JjCommitCommand,
@@ -78,25 +141,63 @@ pub fn jj_commit_command_args(
     files: &[String],
 ) -> Vec<String> {
     match cmd {
-        JjCommitCommand::Commit => with_files_args("commit", message, files),
-        JjCommitCommand::Describe => vec![
-            "describe".to_string(),
-            "-m".to_string(),
-            message.to_string(),
-        ],
-        JjCommitCommand::Split => with_files_args("split", message, files),
+        JjCommitCommand::Commit => with_files_args("commit", message, None, files),
+        JjCommitCommand::Describe => describe_args(message, None),
+        JjCommitCommand::Split => with_files_args("split", message, None, files),
     }
 }
 
-fn with_files_args(subcommand: &str, message: &str, files: &[String]) -> Vec<String> {
+/// Under `--revision`, the one applicable command (prd.md "jj commit commands"): `jj
+/// split -m {{message}} -r {{revision}} -- {{files}}` when `files` is non-empty, `jj
+/// describe -m {{message}} -r {{revision}}` otherwise. `jj commit` only ever acts on
+/// the working copy, so it's never an option here.
+#[must_use]
+pub fn jj_revision_command_args(
+    revision: Revision<'_>,
+    message: &str,
+    files: &[String],
+) -> Vec<String> {
+    if files.is_empty() {
+        describe_args(message, Some(revision.revset))
+    } else {
+        with_files_args("split", message, Some(revision.revset), files)
+    }
+}
+
+fn describe_args(message: &str, revision: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "describe".to_string(),
+        "-m".to_string(),
+        message.to_string(),
+    ];
+    push_revision(&mut args, revision);
+    args
+}
+
+fn with_files_args(
+    subcommand: &str,
+    message: &str,
+    revision: Option<&str>,
+    files: &[String],
+) -> Vec<String> {
     let mut args = vec![
         subcommand.to_string(),
         "-m".to_string(),
         message.to_string(),
-        "--".to_string(),
     ];
+    push_revision(&mut args, revision);
+    args.push("--".to_string());
     args.extend(files.iter().cloned());
     args
+}
+
+/// Appends `-r <revision>` when `--revision` was given; nothing otherwise, so every
+/// argv stays byte-identical to its pre-`--revision` form in the common case.
+fn push_revision(args: &mut Vec<String>, revision: Option<&str>) {
+    if let Some(revision) = revision {
+        args.push("-r".to_string());
+        args.push(revision.to_string());
+    }
 }
 
 /// Renders `program`/`args` as a single shell-quoted, copy-pasteable string for
@@ -118,6 +219,7 @@ fn strs(items: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::PARENT;
 
     #[test]
     fn git_diff_args_match_the_spec_exactly() {
@@ -138,7 +240,7 @@ mod tests {
     #[test]
     fn jj_enumerate_args_match_the_spec_exactly() {
         assert_eq!(
-            jj_enumerate_args(),
+            jj_enumerate_args(None),
             vec![
                 "--no-pager",
                 "diff",
@@ -160,7 +262,7 @@ mod tests {
     #[test]
     fn jj_diff_args_with_no_files() {
         assert_eq!(
-            jj_diff_args(&[]),
+            jj_diff_args(None, &[]),
             vec!["--no-pager", "diff", "--color=never"]
         );
     }
@@ -168,7 +270,7 @@ mod tests {
     #[test]
     fn jj_diff_args_with_files_appended() {
         assert_eq!(
-            jj_diff_args(&["a.rs".to_string(), "b.rs".to_string()]),
+            jj_diff_args(None, &["a.rs".to_string(), "b.rs".to_string()]),
             vec!["--no-pager", "diff", "--color=never", "a.rs", "b.rs"]
         );
     }
@@ -206,6 +308,99 @@ mod tests {
     }
 
     #[test]
+    fn jj_revision_check_args_match_the_spec_exactly() {
+        assert_eq!(
+            jj_revision_check_args("@-"),
+            vec![
+                "--no-pager",
+                "--ignore-working-copy",
+                "log",
+                "--no-graph",
+                "--color=never",
+                "--limit",
+                "2",
+                "-r",
+                "@-",
+                "-T",
+                "commit_id ++ \" \" ++ immutable ++ \" \" ++ current_working_copy ++ \"\\n\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn jj_enumerate_args_with_a_revision() {
+        assert_eq!(
+            jj_enumerate_args(Some(PARENT)),
+            vec![
+                "--no-pager",
+                "--ignore-working-copy",
+                "diff",
+                "--color=never",
+                "-r",
+                "@-",
+                "-T",
+                ENUMERATE_TEMPLATE,
+            ]
+        );
+    }
+
+    #[test]
+    fn jj_diff_args_with_a_revision_precede_the_files() {
+        assert_eq!(
+            jj_diff_args(Some(PARENT), &["a.rs".to_string()]),
+            vec![
+                "--no-pager",
+                "--ignore-working-copy",
+                "diff",
+                "--color=never",
+                "-r",
+                "@-",
+                "a.rs",
+            ]
+        );
+    }
+
+    #[test]
+    fn jj_diff_args_with_the_working_copy_revision_still_snapshot() {
+        let working_copy = Revision {
+            revset: "@",
+            is_working_copy: true,
+        };
+        assert_eq!(
+            jj_diff_args(Some(working_copy), &[]),
+            vec!["--no-pager", "diff", "--color=never", "-r", "@"]
+        );
+        assert_eq!(
+            jj_enumerate_args(Some(working_copy)),
+            vec![
+                "--no-pager",
+                "diff",
+                "--color=never",
+                "-r",
+                "@",
+                "-T",
+                ENUMERATE_TEMPLATE,
+            ]
+        );
+    }
+
+    #[test]
+    fn jj_revision_unscoped_describes() {
+        assert_eq!(
+            jj_revision_command_args(PARENT, "msg", &[]),
+            vec!["describe", "-m", "msg", "-r", "@-"]
+        );
+    }
+
+    #[test]
+    fn jj_revision_scoped_splits_with_the_revision_before_dashdash() {
+        assert_eq!(
+            jj_revision_command_args(PARENT, "msg", &["a.rs".to_string()]),
+            vec!["split", "-m", "msg", "-r", "@-", "--", "a.rs"]
+        );
+    }
+
+    #[test]
     fn render_command_quotes_a_multiline_message() {
         let args = git_commit_args("feat: x\n\nbody line");
         let rendered = render_command("git", &args);
@@ -217,7 +412,7 @@ mod tests {
 
     #[test]
     fn render_command_handles_paths_with_spaces() {
-        let rendered = render_command("jj", &jj_diff_args(&["my file.rs".to_string()]));
+        let rendered = render_command("jj", &jj_diff_args(None, &["my file.rs".to_string()]));
         let words = shell_words::split(&rendered).unwrap();
         assert_eq!(words.last().unwrap(), "my file.rs");
     }

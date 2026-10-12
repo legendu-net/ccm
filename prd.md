@@ -97,7 +97,8 @@ Supported platforms: Linux and macOS only. Windows is out of scope — no
     - prompt the user to select the jj command to use to commit the message for a jj
       repository, and pass the same `--include`/`--exclude`-resolved files into that
       command (see "jj commit commands" in CLI Interface) so the commit matches what the
-      message describes.
+      message describes. With `--revision`, there's only one applicable command, so it
+      runs without a prompt (see "jj commit commands").
 
 8. Define a stable, documented set of process exit codes covering each distinct failure mode
     (see Error Handling), so the thin Lua wrapper can branch on the failure
@@ -183,6 +184,16 @@ Flags:
     mutually exclusive with it. Supported only in a jj repository: removes these
     files/directories from the working-copy diff set. Same git usage error as
     `--include`.
+- `--revision <REVSET>` / `-r <REVSET>` — Generate the message from this jj revision's
+    diff instead of the working copy's, and record it on that revision (see "jj commit
+    commands"). `<REVSET>` is any jj revset (e.g. `@-`, a change ID, a bookmark name)
+    and must resolve to exactly one mutable revision — see "Diff generation". Combines with
+    `--include`/`--exclude` (and the interactive file picker), which then select among
+    *that revision's* changed files. Supported only in a jj repository: usage error
+    (exit code 2) if the repository is being handled as git, same as
+    `--include`/`--exclude`. Its main caller is the Neovim wrapper described in Goal,
+    which reads the revision from the `JJ: Change ID: <id>` line jj writes into the
+    description file it opens in the editor.
 - `--git` — Force git handling in a colocated (git + jj) repository, overriding the
     default preference for jj (see Requirement 1). Harmless no-op if the directory is a
     plain git repository (not colocated). Usage error (exit code 2) if the current
@@ -248,7 +259,7 @@ Flags:
 Passing both `--include` and `--exclude` in the same invocation is a usage error (exit code 2).
 Passing `--include` or `--exclude` while the repository is being handled as git (a plain
 git repository, or a colocated repository with `--git` passed) is also a usage error
-(exit code 2).
+(exit code 2). The same goes for `--revision`.
 Passing `--gen-config` together with any flag other than `--config` is also a usage
 error (exit code 2).
 Passing `--git` when the current directory isn't a git repository at all is also a usage
@@ -260,7 +271,7 @@ Passing `--list-tools` together with any flag other than `--config` is also a us
 
 Default mode (no `--dry-run`) requires a real interactive terminal: the message review
 prompt (see "Message review prompt"), the jj-command picker (a stdin prompt, see "jj
-commit commands"), and `$EDITOR` itself all need genuine interactive stdio to do their
+commit commands"; not shown under `--revision`), and `$EDITOR` itself all need genuine interactive stdio to do their
 jobs — a picker reading from stdin (a line, or — for the review prompt and the
 jj-command picker — a single keypress on a real terminal), an editor attaching to a
 controlling terminal to actually let the user edit. `ccm` runs no explicit upfront check
@@ -297,7 +308,7 @@ never shows the message review prompt, never opens `$EDITOR`, never reads the
 jj-command picker's stdin prompt, never shows the tool picker, and never shows the
 interactive file picker either — it always takes the first `enabled: true` entry
 regardless of how many entries are enabled (exit code 6 if none are), and always diffs
-the whole working copy unless `--include`/`--exclude` was given explicitly on the
+the whole working copy (or the whole `--revision` revision) unless `--include`/`--exclude` was given explicitly on the
 command line. So it runs correctly with stdin/stdout piped, redirected, or absent
 entirely (see "Default behavior", "jj commit commands", and "Selection"). This split is
 deliberate, matching the two ways `ccm` is meant to be used (see Goal): default mode is
@@ -328,11 +339,37 @@ colored regardless of the user's git/jj config (see `design.md`, "Diff generatio
     whatever they want a message generated for before running `ccm` — unstaged changes
     are invisible to it, the same precondition `git commit` itself has; if nothing is
     staged, this surfaces at runtime as exit code 8 (see Error Handling).
-- jj: `jj --no-pager diff --color=never` plus the resolved file arguments, if any (see
-    "Diff scope resolution" below).
+- jj: `jj --no-pager diff --color=never`, plus `-r <REVSET>` if `--revision` was given
+    (and `--ignore-working-copy` too when that revision isn't the working copy `@`),
+    plus the resolved file arguments, if any (see "Diff scope resolution" below).
 
 This is what actually gets run; the `Generating diff using: <command>` progress line
 (see Progress logging) reports this exact invocation, including these flags.
+
+When `--revision <REVSET>` is given, `ccm` first checks — at stage 3 of "Check order",
+before config loading, the tool picker, the enumeration call and the interactive file
+picker below — that it resolves to exactly one mutable revision, by running
+`jj --no-pager --ignore-working-copy log --no-graph --color=never --limit 2 -r <REVSET>
+-T 'commit_id ++ " " ++ immutable ++ " " ++ current_working_copy ++ "\n"'`
+and counting the output lines (see `design.md`, "Revision selection (`--revision`)"). If that call itself fails
+(e.g. `jj` not found, a revset syntax error, or a revision that doesn't exist), that's
+exit code 7, the same as any other jj invocation failing; so is a single
+output line that isn't a commit id followed by two ` true`/` false` flags (e.g. a
+template alias shadowing `immutable`), rather than silently treating the revision as
+mutable. If it succeeds
+but prints zero lines or two, the revset doesn't name exactly one revision: a usage
+error (exit code 2), `--revision <REVSET>: must resolve to exactly one revision`. So
+is a call that fails because the revset references a divergent change id: jj reports
+``Change ID `<id>` is divergent`` instead of listing that change's revisions. If it
+names exactly one revision but that revision is immutable (e.g. a trunk bookmark like
+`main`, or `root()`), it can't be described or split: a usage error (exit code 2),
+`--revision <REVSET>: revision is immutable` — rejected here rather than when `jj
+describe`/`jj split` fails after the message has been generated and reviewed. This
+check is not itself progress-logged. `<REVSET>` is then passed as typed (not as the
+resolved commit ID) to every later jj invocation. Wherever the rest of this section,
+"Interactive file selection", "jj commit commands", "Interactive terminal
+requirement", and the `--include`/`--exclude` entries under Flags say "the working
+copy" of a jj repository, read "the `--revision` revision" when `--revision` was given.
 
 Diff scope resolution (jj only — `--include`/`--exclude` are a usage error under git handling):
 
@@ -345,7 +382,8 @@ Diff scope resolution (jj only — `--include`/`--exclude` are a usage error und
 
 To resolve `--include`/`--exclude` (and to validate their paths per the rules below),
 `ccm` first enumerates the changed files in the jj working copy with a separate `jj
---no-pager diff --color=never -T <template>` call (see `design.md`, "Diff scope
+--no-pager diff --color=never [-r <REVSET>] -T <template>` call (plus
+`--ignore-working-copy` when that revision isn't `@`; see `design.md`, "Diff scope
 resolution", for the template format and why jj's fileset `~` operator isn't used
 instead). This enumeration call can fail the same way a diff invocation can — e.g. `jj`
 not found, or erroring inside a jj repository for some other reason — which is reported
@@ -445,12 +483,16 @@ candidate is shown as `<status>  <path>`
 (the enumeration's status character and the file's path — for a rename/copy, its `<new>`
 path, never `<old>`; see the rename/copy handling above). The
 `fzf` front-end additionally previews the highlighted file's own diff in a side pane
-(`jj --no-pager diff --color=always -- <path>`), letting the choice be made by eye. Both
+(`jj --no-pager diff --color=always -- <path>`, or with `-r <REVSET>` under
+`--revision`, plus `--ignore-working-copy` when that revision isn't `@`), letting the
+choice be made by eye. Both
 front-ends allow marking any number of candidates before confirming — `fzf` via
 `--multi` (Tab to mark), the numbered fallback via a comma- or whitespace-separated list
 of indices, with a blank line meaning every candidate.
 
-The marked subset — even when it's every enumerated candidate — becomes the file scope
+The marked subset — even when it's every enumerated candidate (though under
+`--revision` one covering the whole revision is recorded unscoped; see "jj commit
+commands") — becomes the file scope
 exactly as a resolved `--include` would: passed as explicit file arguments to the final
 `jj --no-pager diff --color=never <files...>` invocation, and threaded through unchanged
 to the jj commit-command picker afterward, which then offers `jj split` instead of `jj
@@ -462,7 +504,8 @@ diff`/`jj commit` invocations, whereas the marked list is fixed at the moment th
 closes, so a file that starts changing after enumeration — one the user was never shown
 — is never swept into the diff or the commit. As a consequence, "select everything"
 still offers `jj split` rather than `jj describe` (see `design.md`, "Interactive file
-selection: why "select everything" is not "decline"").
+selection: why "select everything" is not "decline"") — without `--revision`, that is;
+see the **--revision** paragraph in "jj commit commands" for the `--revision` case.
 
 Default behavior (no `--dry-run`): compute the diff, generate the commit message,
 open it in `$EDITOR` — always, even if generation came back blank — and after the user
@@ -720,7 +763,8 @@ never ends up mixed into it even when stdout is piped/captured. Roughly, in orde
 - `Generating diff using: <command>` — before running the `git diff`/`jj diff` invocation.
     For jj with `--include`/`--exclude`, the `jj diff -T <template>` enumeration call
     used to resolve the scope (see "Diff scope resolution") runs first but is not itself
-    progress-logged.
+    progress-logged; neither is the `jj log` call that checks `--revision` (see "Diff
+    generation").
 - `Generating commit message using <name> (<model>)…` — before calling the selected
     `api.yaml` entry.
 - `Generated empty message using <name> (<model>)` — if the tool/API's response, after
@@ -777,6 +821,10 @@ containing spaces, shell metacharacters, or a leading `-` is passed through safe
 | `jj commit` | `commit -m {{message}} -- {{files}}` |
 | `jj describe` | `describe -m {{message}}` |
 | `jj split` | `split -m {{message}} -- {{files}}` |
+
+With `--revision <REVSET>`, `jj describe` and `jj split` also get `-r <REVSET>`:
+`describe -m {{message}} -r <REVSET>` and `split -m {{message}} -r <REVSET> -- {{files}}`
+(see the **--revision** paragraph at the end of this section).
 
 `jj commit -i` is deliberately not offered: it's just `jj commit`'s interactive mode
 (prompting the user to hunk-select within each file), and none of the commands `ccm`
@@ -840,6 +888,26 @@ True EOF (Ctrl-D) on stdin is a separate signal from a blank line and is unaffec
 the default: it still cancels the picker outright. If the user cancels — EOF without a
 valid selection — `ccm` aborts immediately — a blank *line* would have selected the
 default, but EOF is not a blank line — does not commit, and exits with code 14.
+
+**--revision.** `jj commit` only ever acts on the working copy, so it is never offered
+when `--revision` was given. That leaves exactly one applicable command — `jj split -r
+<REVSET>` when `--include`/`--exclude` was given or the interactive file picker
+restricted the scope, `jj describe -r <REVSET>` otherwise — so the picker above is not
+shown at all and that command runs directly once the message is confirmed non-blank.
+This holds even when `<REVSET>` resolves to the working copy itself (e.g. `-r @`):
+whether the picker appears depends on the flags given, not on what the revset
+evaluates to (see `design.md`, "Revision selection (`--revision`)"). `jj split -r`
+leaves the unselected changes in a new revision that keeps `<REVSET>`'s original
+description. A scope that nonetheless covers every changed file of `<REVSET>` (e.g.
+`--include` naming all of them, or marking every candidate in the interactive file
+picker) is recorded with `jj describe -r <REVSET>` instead: `jj split` with everything
+selected would leave behind an empty, undescribed revision. Unlike the working-copy
+case (see `design.md`, "Interactive file selection: why "select everything" is not
+"decline""), the whole-revision check is made once against the enumerated files,
+during diff generation — for the interactive file picker's selection, by enumerating
+the revision again. For `-r @`, this means a file that
+starts changing after that check is included by `jj describe -r @` even though the message never saw it — the same drift
+an unscoped run accepts.
 
 ## Configuration
 
@@ -1122,8 +1190,12 @@ later stages are never reached:
 2. **Repository detection** — the git/jj checks in "Repository detection" (exit code 4
    if neither succeeds).
 3. **Repo-dependent argument validation** — usage errors that need the repo type from
-   step 2: `--git` outside a git repository, `--include`/`--exclude` when the repository
-   is being handled as git (exit code 2).
+   step 2: `--git` outside a git repository, `--include`/`--exclude`/`--revision` when
+   the repository is being handled as git (exit code 2). Then, for jj with `--revision`,
+   checking that it resolves to exactly one mutable revision (exit code 7 if the `jj
+   log` call itself fails, exit code 2 if it resolves to zero or several, or to an
+   immutable one — see "Diff generation"), so a bad revset fails before any picker
+   prompt.
 4. **Config load & validation** — reading, parsing, and cross-validating
    `prompts.yaml`/`api.yaml` from the config directory (the default described under
    `--config` in Flags, or the directory given via `--config`) (exit code 5).
@@ -1174,8 +1246,9 @@ later stages are never reached:
    file it saved (exit code 1 if the file has gone missing or unreadable by then, since
    neither exit 13 nor exit 15 apply); for either edit or accept, cleanup and the
    empty-message check (exit code 15); then — only once the cleaned message is confirmed
-   non-blank — the jj commit-command picker (exit code 14, jj only) and the final
-   `git commit`/`jj commit` invocation (exit code 16).
+   non-blank — the jj commit-command picker (exit code 14, jj only, skipped under
+   `--revision` — see "jj commit commands") and the final `git commit`/`jj
+   commit`\|`describe`\|`split` invocation (exit code 16).
 
 So for the example above — no repo, missing `api.yaml`, `--include` given — step 2
 fails first with exit code 4; the `--include` usage error (step 3) and the config error
@@ -1185,7 +1258,9 @@ Rows below are ordered to match the check-order pipeline above (cross-cutting co
 and 1 first, then each stage in sequence, renumbered so the code column is strictly
 increasing top to bottom); exit code 2 recurs across three stages (argument shape,
 repo-dependent argument validation, and diff-scope path validation) so it's listed
-once, at its earliest possible stage. Two codes are exceptions to the strictly-increasing
+once, at its earliest possible stage; likewise exit code 7, which the `--revision`
+check can already raise at stage 3, is listed at its diff-generation position. Two
+other codes are exceptions to the strictly-increasing
 ordering, both kept at their numeric position in the table (rather than their pipeline
 position) to avoid renumbering the rest of the editor/commit-stage codes: exit code 17
 (temp file creation/write failure) falls between exit codes 12 and 13 in the pipeline
@@ -1203,8 +1278,8 @@ before 15 in the table.
 | 4 | Not a git or jj repository |
 | 5 | Config error — `api.yaml`/`prompts.yaml` missing, unreadable (e.g. permission denied), fails to parse, fails validation (including a duplicate `name` across `api.yaml` entries), references an unknown prompt, or `api.yaml` is an empty list; looked up in the config directory (the default described under `--config` in Flags, or the directory given via `--config`) |
 | 6 | Tool/API selection failed — under `--dry-run` with no `--tool`, every `api.yaml` entry is disabled (default mode instead prompts in this case — see "Selection"), or a non-empty `--tool <NAME>` matched no entry |
-| 7 | Diff generation failed — the underlying `git diff`/`jj diff` invocation itself errored; for jj with `--include`/`--exclude` this also covers the `jj diff -T <template>` enumeration call failing (see "Diff scope resolution") |
-| 8 | Nothing to diff — no staged changes (git), or an empty working-copy diff (jj) after applying `--include`/`--exclude` |
+| 7 | Diff generation failed (or, at stage 3, the `--revision` check's `jj log` call failed) — the underlying `git diff`/`jj diff` invocation itself errored; for jj with `--include`/`--exclude` this also covers the `jj diff -T <template>` enumeration call failing (see "Diff scope resolution"), and for jj with `--revision` the `jj log` call that checks it (see "Diff generation") |
+| 8 | Nothing to diff — no staged changes (git), or an empty working-copy (or `--revision`) diff (jj) after applying `--include`/`--exclude` |
 | 9 | API key resolution failed |
 | 10 | Tool/API call failed — network error, exceeding the entry's `timeout` (see `timeout` under Common fields; for `agent_cli` the subprocess is killed via `SIGTERM`, then `SIGKILL` if it hasn't exited within the grace period, before this is reported, and any stderr output it had produced up to that point is still included in the reported error, same as any other `agent_cli` failure), non-zero exit, or an explicit API-level error response. For `agent_cli`, this also covers the agent CLI rejecting the configured `model` at run time (e.g. `Error: invalid model selection`), since `model` is passed through unvalidated — `ccm` includes the agent CLI's stderr output in the reported error so the user can tell a bad model apart from other tool failures. For `openai_api`, a non-2xx response's body is surfaced the same way — included in the reported error alongside the HTTP status code, not just the status code alone — so the user can see the actual routing/provider error text (e.g. from OmniRoute) behind a failure, the same diagnostic value the `agent_cli` stderr inclusion provides. |
 | 11 | Malformed response — `openai_api` only: the response could not be parsed, or parsed but missing the expected message content. Not applicable to `agent_cli`, whose output is raw stdout text; a bad `agent_cli` result surfaces as exit code 10 (non-zero exit) or exit code 15 (blank result), never 11. |

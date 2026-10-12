@@ -17,6 +17,7 @@ use crate::error::CcmError;
 use crate::fzf;
 use crate::picker;
 use crate::progress;
+use crate::vcs::argv::Revision;
 use crate::vcs::scope::{self, Selection};
 use crate::vcs::summary::SummaryEntry;
 use std::io::BufRead;
@@ -42,27 +43,32 @@ use std::path::Path;
 ///   enumerated paths cannot. The tradeoff is that marking every candidate still flips
 ///   the jj commit-command picker from `[D]escribe` to `[S]plit` (see `commit.rs`),
 ///   even though nothing was excluded — the accepted cost of not silently including a
-///   file the user was never shown.
+///   file the user was never shown. Under `--revision`, `diff::generate` still records
+///   a selection that covers the whole revision with `jj describe -r` (see
+///   `diff::DiffResult::files`).
 ///
 /// `fzf_enabled` is `!fzf::disabled_by_env(...)` — the caller (`pipeline.rs`) only
 /// calls this function at all once its own `env.stdin_is_terminal()` guard has
 /// already passed, the same terminal check stage 5's tool picker folds into its own
 /// `fzf_enabled` computation; here it's just checked one call frame up instead. `raw`
 /// is forwarded to the yes/no prompt only — `fzf` and the numbered fallback have no
-/// raw-mode concept of their own.
+/// raw-mode concept of their own. `revision` is `--revision`'s value, if given: the
+/// candidates (and `fzf`'s per-file preview) then come from that revision instead of
+/// the working copy.
 ///
 /// # Errors
 /// Any error [`diff::enumerate_jj`] itself can surface (exit 7); otherwise
 /// [`crate::error::PickerCancelled`] (exit 14) if either prompt is cancelled.
 pub fn resolve_interactively(
     cwd: &Path,
+    revision: Option<Revision<'_>>,
     stdin: &mut dyn BufRead,
     stderr: &mut dyn std::io::Write,
     fzf_picker: &dyn fzf::Fzf,
     fzf_enabled: bool,
     raw: bool,
 ) -> Result<Selection, CcmError> {
-    let entries = diff::enumerate_jj(cwd)?;
+    let entries = diff::enumerate_jj(revision, cwd)?;
     let targets = dedup_targets(&entries);
     if targets.len() <= 1 {
         return Ok(Selection::All);
@@ -76,7 +82,7 @@ pub fn resolve_interactively(
 
     let lines = candidate_lines(&entries, &targets);
     let indices = if fzf_enabled {
-        match fzf_picker.select_files(cwd, &lines) {
+        match fzf_picker.select_files(cwd, revision, &lines) {
             fzf::FzfMultiOutcome::Selected(indices) => indices,
             fzf::FzfMultiOutcome::Cancelled => {
                 return Err(picker::to_ccm_error(picker::PickerError::Cancelled));
@@ -187,7 +193,12 @@ mod tests {
         fn select(&self, _cwd: &Path, _lines: &[String]) -> fzf::FzfOutcome {
             panic!("select should not have been invoked in this test");
         }
-        fn select_files(&self, _cwd: &Path, _lines: &[String]) -> fzf::FzfMultiOutcome {
+        fn select_files(
+            &self,
+            _cwd: &Path,
+            _revision: Option<Revision<'_>>,
+            _lines: &[String],
+        ) -> fzf::FzfMultiOutcome {
             panic!("select_files should not have been invoked in this test");
         }
     }
@@ -197,7 +208,12 @@ mod tests {
         fn select(&self, _cwd: &Path, _lines: &[String]) -> fzf::FzfOutcome {
             panic!("select should not have been invoked in this test");
         }
-        fn select_files(&self, _cwd: &Path, _lines: &[String]) -> fzf::FzfMultiOutcome {
+        fn select_files(
+            &self,
+            _cwd: &Path,
+            _revision: Option<Revision<'_>>,
+            _lines: &[String],
+        ) -> fzf::FzfMultiOutcome {
             self.0.clone()
         }
     }
@@ -228,9 +244,16 @@ mod tests {
         // rather than returning a selection.
         let mut stdin = std::io::Cursor::new(Vec::new());
         let mut stderr = Vec::new();
-        let selection =
-            resolve_interactively(&repo, &mut stdin, &mut stderr, &PanickingFzf, true, false)
-                .unwrap();
+        let selection = resolve_interactively(
+            &repo,
+            None,
+            &mut stdin,
+            &mut stderr,
+            &PanickingFzf,
+            true,
+            false,
+        )
+        .unwrap();
         assert_eq!(selection, Selection::All);
         let printed = String::from_utf8(stderr).unwrap();
         assert!(!printed.contains("Restrict the diff to specific files?"));
@@ -242,9 +265,16 @@ mod tests {
         std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
         let mut stdin = std::io::Cursor::new(Vec::new());
         let mut stderr = Vec::new();
-        let selection =
-            resolve_interactively(&repo, &mut stdin, &mut stderr, &PanickingFzf, true, false)
-                .unwrap();
+        let selection = resolve_interactively(
+            &repo,
+            None,
+            &mut stdin,
+            &mut stderr,
+            &PanickingFzf,
+            true,
+            false,
+        )
+        .unwrap();
         assert_eq!(selection, Selection::All);
         let printed = String::from_utf8(stderr).unwrap();
         assert!(!printed.contains("Restrict the diff to specific files?"));
@@ -257,9 +287,16 @@ mod tests {
         std::fs::write(repo.join("b.rs"), "world\n").unwrap();
         let mut stdin = std::io::Cursor::new(b"n\n".to_vec());
         let mut stderr = Vec::new();
-        let selection =
-            resolve_interactively(&repo, &mut stdin, &mut stderr, &PanickingFzf, true, false)
-                .unwrap();
+        let selection = resolve_interactively(
+            &repo,
+            None,
+            &mut stdin,
+            &mut stderr,
+            &PanickingFzf,
+            true,
+            false,
+        )
+        .unwrap();
         assert_eq!(selection, Selection::All);
         let printed = String::from_utf8(stderr).unwrap();
         assert!(printed.contains("Restrict the diff to specific files?"));
@@ -272,8 +309,16 @@ mod tests {
         std::fs::write(repo.join("b.rs"), "world\n").unwrap();
         let mut stdin = std::io::Cursor::new(Vec::new());
         let mut stderr = Vec::new();
-        let err = resolve_interactively(&repo, &mut stdin, &mut stderr, &PanickingFzf, true, false)
-            .unwrap_err();
+        let err = resolve_interactively(
+            &repo,
+            None,
+            &mut stdin,
+            &mut stderr,
+            &PanickingFzf,
+            true,
+            false,
+        )
+        .unwrap_err();
         assert_eq!(err.exit_code().as_u8(), 14);
     }
 
@@ -290,9 +335,16 @@ mod tests {
         let mut stdin = std::io::Cursor::new(b"y\n".to_vec());
         let mut stderr = Vec::new();
         let fzf_picker = FakeFilesFzf(fzf::FzfMultiOutcome::Selected(vec![0, 1]));
-        let selection =
-            resolve_interactively(&repo, &mut stdin, &mut stderr, &fzf_picker, true, false)
-                .unwrap();
+        let selection = resolve_interactively(
+            &repo,
+            None,
+            &mut stdin,
+            &mut stderr,
+            &fzf_picker,
+            true,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             selection,
             Selection::Explicit(vec!["a.rs".to_string(), "b.rs".to_string()])
@@ -307,9 +359,16 @@ mod tests {
         let mut stdin = std::io::Cursor::new(b"y\n".to_vec());
         let mut stderr = Vec::new();
         let fzf_picker = FakeFilesFzf(fzf::FzfMultiOutcome::Selected(vec![0]));
-        let selection =
-            resolve_interactively(&repo, &mut stdin, &mut stderr, &fzf_picker, true, false)
-                .unwrap();
+        let selection = resolve_interactively(
+            &repo,
+            None,
+            &mut stdin,
+            &mut stderr,
+            &fzf_picker,
+            true,
+            false,
+        )
+        .unwrap();
         assert_eq!(selection, Selection::Explicit(vec!["a.rs".to_string()]));
         let printed = String::from_utf8(stderr).unwrap();
         assert!(printed.contains("a.rs"));
@@ -323,8 +382,16 @@ mod tests {
         let mut stdin = std::io::Cursor::new(b"y\n".to_vec());
         let mut stderr = Vec::new();
         let fzf_picker = FakeFilesFzf(fzf::FzfMultiOutcome::Cancelled);
-        let err = resolve_interactively(&repo, &mut stdin, &mut stderr, &fzf_picker, true, false)
-            .unwrap_err();
+        let err = resolve_interactively(
+            &repo,
+            None,
+            &mut stdin,
+            &mut stderr,
+            &fzf_picker,
+            true,
+            false,
+        )
+        .unwrap_err();
         assert_eq!(err.exit_code().as_u8(), 14);
     }
 
@@ -336,9 +403,16 @@ mod tests {
         let mut stdin = std::io::Cursor::new(b"y\n0\n".to_vec());
         let mut stderr = Vec::new();
         let fzf_picker = FakeFilesFzf(fzf::FzfMultiOutcome::Unavailable("fzf not found".into()));
-        let selection =
-            resolve_interactively(&repo, &mut stdin, &mut stderr, &fzf_picker, true, false)
-                .unwrap();
+        let selection = resolve_interactively(
+            &repo,
+            None,
+            &mut stdin,
+            &mut stderr,
+            &fzf_picker,
+            true,
+            false,
+        )
+        .unwrap();
         assert_eq!(selection, Selection::Explicit(vec!["a.rs".to_string()]));
         let printed = String::from_utf8(stderr).unwrap();
         assert!(printed.contains("fzf unavailable"));
@@ -352,9 +426,16 @@ mod tests {
         std::fs::write(repo.join("b.rs"), "world\n").unwrap();
         let mut stdin = std::io::Cursor::new(b"y\n0\n".to_vec());
         let mut stderr = Vec::new();
-        let selection =
-            resolve_interactively(&repo, &mut stdin, &mut stderr, &PanickingFzf, false, false)
-                .unwrap();
+        let selection = resolve_interactively(
+            &repo,
+            None,
+            &mut stdin,
+            &mut stderr,
+            &PanickingFzf,
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(selection, Selection::Explicit(vec!["a.rs".to_string()]));
     }
 
@@ -365,12 +446,50 @@ mod tests {
         std::fs::write(repo.join("b.rs"), "world\n").unwrap();
         let mut stdin = std::io::Cursor::new(b"y\n\n".to_vec());
         let mut stderr = Vec::new();
-        let selection =
-            resolve_interactively(&repo, &mut stdin, &mut stderr, &PanickingFzf, false, false)
-                .unwrap();
+        let selection = resolve_interactively(
+            &repo,
+            None,
+            &mut stdin,
+            &mut stderr,
+            &PanickingFzf,
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             selection,
             Selection::Explicit(vec!["a.rs".to_string(), "b.rs".to_string()])
         );
+    }
+
+    #[test]
+    fn a_revision_offers_that_revisions_files_not_the_working_copys() {
+        let (tmp, repo) = jj_repo();
+        std::fs::write(repo.join("a.rs"), "hello\n").unwrap();
+        std::fs::write(repo.join("b.rs"), "world\n").unwrap();
+        crate::testutil::jj_new(&tmp, &repo);
+        std::fs::write(repo.join("c.rs"), "working copy only\n").unwrap();
+        let mut stdin = std::io::Cursor::new(b"y\n\n".to_vec());
+        let mut stderr = Vec::new();
+        let selection = resolve_interactively(
+            &repo,
+            Some(crate::testutil::PARENT),
+            &mut stdin,
+            &mut stderr,
+            &PanickingFzf,
+            false,
+            false,
+        )
+        .unwrap();
+        // Pinned like the working-copy case; `diff::generate` decides whether it covers
+        // the whole revision.
+        assert_eq!(
+            selection,
+            Selection::Explicit(vec!["a.rs".to_string(), "b.rs".to_string()])
+        );
+        let logged = String::from_utf8(stderr).unwrap();
+        assert!(logged.contains("a.rs"));
+        assert!(logged.contains("b.rs"));
+        assert!(!logged.contains("c.rs"));
     }
 }

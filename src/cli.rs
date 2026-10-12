@@ -3,8 +3,9 @@
 //! Only checks that don't depend on repo state live here (prd.md "Check order",
 //! stage 1: `--include`+`--exclude` together, `--gen-config` combined with anything
 //! other than `--config`). Checks that need to know whether the repo is being handled
-//! as git or jj (`--git` outside a git repo, `--include`/`--exclude` under git) are
-//! stage 3 and live in `pipeline.rs`, once repo detection (stage 2) has run.
+//! as git or jj (`--git` outside a git repo, `--include`/`--exclude`/`--revision`
+//! under git) are stage 3 and live in `pipeline.rs`, once repo detection (stage 2) has
+//! run.
 
 use crate::error::UsageError;
 use clap::Parser;
@@ -48,6 +49,11 @@ pub struct Cli {
     /// An empty NAME ('') forces the tool picker for this run instead, in any mode.
     #[arg(short = 't', long, value_name = "NAME")]
     pub tool: Option<String>,
+
+    /// Generate the message from (and describe/split) this jj revision instead of the
+    /// working copy (jj only). Must resolve to exactly one mutable revision.
+    #[arg(short = 'r', long, value_name = "REVSET")]
+    pub revision: Option<String>,
 }
 
 impl Cli {
@@ -72,7 +78,8 @@ pub fn validate_shape(cli: &Cli) -> Result<(), UsageError> {
             || cli.list_tools
             || cli.tool.is_some()
             || !cli.include.is_empty()
-            || !cli.exclude.is_empty())
+            || !cli.exclude.is_empty()
+            || cli.revision.is_some())
     {
         return Err(UsageError::GenConfigWithOtherFlags);
     }
@@ -81,7 +88,8 @@ pub fn validate_shape(cli: &Cli) -> Result<(), UsageError> {
             || cli.dry_run
             || cli.tool.is_some()
             || !cli.include.is_empty()
-            || !cli.exclude.is_empty())
+            || !cli.exclude.is_empty()
+            || cli.revision.is_some())
     {
         return Err(UsageError::ListToolsWithOtherFlags);
     }
@@ -102,6 +110,7 @@ mod tests {
             gen_config: false,
             list_tools: false,
             tool: None,
+            revision: None,
         }
     }
 
@@ -192,6 +201,17 @@ mod tests {
     }
 
     #[test]
+    fn gen_config_with_revision_is_rejected() {
+        let mut cli = base();
+        cli.gen_config = true;
+        cli.revision = Some("@-".into());
+        assert!(matches!(
+            validate_shape(&cli),
+            Err(UsageError::GenConfigWithOtherFlags)
+        ));
+    }
+
+    #[test]
     fn list_tools_alone_is_fine() {
         let mut cli = base();
         cli.list_tools = true;
@@ -229,6 +249,25 @@ mod tests {
     }
 
     #[test]
+    fn list_tools_with_revision_is_rejected() {
+        let mut cli = base();
+        cli.list_tools = true;
+        cli.revision = Some("@-".into());
+        assert!(matches!(
+            validate_shape(&cli),
+            Err(UsageError::ListToolsWithOtherFlags)
+        ));
+    }
+
+    #[test]
+    fn revision_with_include_is_fine() {
+        let mut cli = base();
+        cli.revision = Some("@-".into());
+        cli.include = vec![PathBuf::from("a")];
+        assert!(validate_shape(&cli).is_ok());
+    }
+
+    #[test]
     fn tool_alone_is_fine() {
         let mut cli = base();
         cli.tool = Some("x".into());
@@ -254,6 +293,7 @@ mod tests {
         assert!(!cli.gen_config);
         assert!(!cli.list_tools);
         assert_eq!(cli.tool, None);
+        assert_eq!(cli.revision, None);
     }
 
     #[test]
@@ -281,5 +321,11 @@ mod tests {
 
         let cli = Cli::parse_from(["ccm", "-d"]);
         assert!(cli.dry_run);
+
+        let cli = Cli::parse_from(["ccm", "-r", "@-"]);
+        assert_eq!(cli.revision, Some("@-".to_string()));
+
+        let cli = Cli::parse_from(["ccm", "--revision", "@-"]);
+        assert_eq!(cli.revision, Some("@-".to_string()));
     }
 }

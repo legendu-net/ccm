@@ -51,10 +51,10 @@ impl Selection {
     }
 }
 
-/// A `--include`/`--exclude` entry that matched zero lines of the enumerated working
-/// copy (prd.md: "a usage error, not silently ignored").
+/// A `--include`/`--exclude` entry that matched zero lines of the enumerated revision
+/// (the working copy, or `--revision`'s) (prd.md: "a usage error, not silently ignored").
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{entry}: does not match any file in the jj working copy")]
+#[error("{entry}: does not match any changed file")]
 pub struct ScopeError {
     pub entry: String,
 }

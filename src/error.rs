@@ -53,10 +53,16 @@ pub enum UsageError {
     GitFlagOutsideGitRepo,
     #[error("--include/--exclude are only supported for jj repositories")]
     IncludeExcludeUnderGit,
-    #[error("{entry}: does not match any file in the jj working copy")]
+    #[error("{entry}: does not match any changed file")]
     UnmatchedPath { entry: String },
     #[error("--list-tools cannot be combined with any flag other than --config")]
     ListToolsWithOtherFlags,
+    #[error("--revision is only supported for jj repositories")]
+    RevisionUnderGit,
+    #[error("--revision {revision}: must resolve to exactly one revision")]
+    RevisionNotSingle { revision: String },
+    #[error("--revision {revision}: revision is immutable")]
+    RevisionImmutable { revision: String },
 }
 
 /// Stage 1 (short-circuit): `--gen-config` failed to create the config directory or
@@ -116,10 +122,13 @@ pub enum SelectionError {
     UnknownTool { name: String },
 }
 
-/// Stage 6: diff enumeration/generation (exit 7), and nothing to diff (exit 8).
+/// Stage 3: `--revision` resolution (exit 7). Stage 6: diff enumeration/generation
+/// (exit 7), and nothing to diff (exit 8).
 #[derive(Debug, thiserror::Error)]
 pub enum DiffError {
-    #[error("failed to enumerate working-copy files: {0}")]
+    #[error("failed to resolve revision: {0}")]
+    Revision(String),
+    #[error("failed to enumerate changed files: {0}")]
     Enumeration(String),
     #[error("failed to generate diff: {0}")]
     Generation(String),
@@ -212,9 +221,9 @@ impl CcmError {
             CcmError::NotARepo(_) => ExitCode::NOT_A_REPO,
             CcmError::Config(_) => ExitCode::CONFIG_ERROR,
             CcmError::Selection(_) => ExitCode::SELECTION_FAILED,
-            CcmError::Diff(DiffError::Enumeration(_) | DiffError::Generation(_)) => {
-                ExitCode::DIFF_FAILED
-            }
+            CcmError::Diff(
+                DiffError::Revision(_) | DiffError::Enumeration(_) | DiffError::Generation(_),
+            ) => ExitCode::DIFF_FAILED,
             CcmError::Diff(DiffError::Empty) => ExitCode::NOTHING_TO_DIFF,
             CcmError::Generation(GenerationError::ApiKeyResolution(_)) => ExitCode::API_KEY_FAILED,
             CcmError::Generation(GenerationError::CallFailed(_)) => ExitCode::CALL_FAILED,
@@ -247,6 +256,21 @@ mod tests {
             (UsageError::IncludeExcludeUnderGit.into(), 2),
             (UsageError::UnmatchedPath { entry: "x".into() }.into(), 2),
             (UsageError::ListToolsWithOtherFlags.into(), 2),
+            (UsageError::RevisionUnderGit.into(), 2),
+            (
+                UsageError::RevisionNotSingle {
+                    revision: "x".into(),
+                }
+                .into(),
+                2,
+            ),
+            (
+                UsageError::RevisionImmutable {
+                    revision: "x".into(),
+                }
+                .into(),
+                2,
+            ),
             (GenConfigError("boom".into()).into(), 3),
             (NotARepo.into(), 4),
             (ConfigError::Empty.into(), 5),
@@ -282,6 +306,7 @@ mod tests {
             ),
             (SelectionError::NoEnabledTool.into(), 6),
             (SelectionError::UnknownTool { name: "x".into() }.into(), 6),
+            (DiffError::Revision("x".into()).into(), 7),
             (DiffError::Enumeration("x".into()).into(), 7),
             (DiffError::Generation("x".into()).into(), 7),
             (DiffError::Empty.into(), 8),

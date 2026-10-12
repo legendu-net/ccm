@@ -84,6 +84,97 @@ a user's global config forcing color/pager on regardless of TTY (e.g.
 Subprocesses are spawned and captured in one place (`vcs/exec.rs`), which pumps
 stdin/stdout/stderr on separate threads so a large diff can't deadlock on a full pipe.
 
+### Revision selection (`--revision`)
+
+`--revision <REVSET>` exists for the Neovim wrapper's sake: jj opens the same
+`*.jjdescription` editor file for `jj describe <rev>`, `jj split`, `jj commit`, etc.,
+and only the file's `JJ: Change ID: <id>` line says which revision it's for. Before
+this flag, `ccm` could only ever diff `@`, so a description buffer for any other
+revision got a message about the wrong change.
+
+- **Exactly one revision, checked up front.** `ccm` runs `jj log --limit 2 -r <REVSET>
+  -T 'commit_id ++ " " ++ immutable ++ " " ++ current_working_copy ++ "\n"'` first, at
+  stage 3 (repo-dependent argument validation), and requires exactly one output line.
+  `--limit 2` because the only question is "one, or not one" — an accidental `all()`
+  shouldn't print the whole repo just to be rejected. The check runs before config loading, the tool picker and the
+  interactive file picker, so a bad revset never costs the user a prompt. A
+  revset is an expression, not an id: one `-r` value can name zero, one, or many
+  revisions (`@-` on a merge commit names both parents), and only jj can tell. Diffing
+  several revisions would work — `jj diff -r` gives a combined diff — but every step
+  that *writes* the message goes wrong:
+  - `jj describe -r` stamps the same message on every revision, so each gets a
+    description that also covers changes it doesn't contain.
+  - `jj split -r` (used when the scope is restricted) refuses a multi-revision revset,
+    but without the up-front check only at commit time, after the LLM call, the review
+    and any editing — so that work would be lost.
+  - A multi-revision revset is usually a mistake (`main::`, a `description(...)` that
+    matches more than one commit), better reported as a usage error than turned
+    silently into a message about a combined diff.
+  - The Neovim wrapper, the flag's reason for existing, always passes a single Change
+    ID and skips multi-revision describe files.
+  - Allowing several revisions under `--dry-run` only (e.g. to draft a message for a
+    later `jj squash` of a range) was considered and rejected for now: one rule for
+    every mode is simpler, and nothing needs it yet.
+- **Immutable revisions are rejected in the same check.** The template also prints
+  each revision's `immutable` flag, and an immutable revision (e.g. `-r main`, or
+  `root()`) is a usage error. Otherwise `jj describe -r`/`jj split -r` would refuse it
+  ("Commit ... is immutable") only at commit time, after the LLM call, the review and
+  any editing — the same late failure the single-revision check exists to avoid. Like
+  that check, it applies under `--dry-run` too: one rule for every mode.
+- **The revset is passed through as typed, not as the resolved commit id.** Every later
+  command (`jj diff -r`, `jj describe -r`, `jj split -r`, the enumeration call) gets the
+  user's own `<REVSET>`, so progress lines (`Generating diff using: ...`, `Committed
+  using: ...`) show what the user wrote. The resolved commit id would also go stale for
+  the later commit command anyway if anything rewrote the revision in between (the same
+  time-of-check-to-time-of-use gap as "Known limitation: enumeration vs. diff race"
+  below), while a revset like `@-` or a change id keeps following the change.
+- **No working-copy snapshot for a revision other than `@`.** Every jj command snapshots
+  the working copy first by default, and a snapshot that finds changes records a new
+  operation. Under the Neovim wrapper, `ccm` runs inside an outer `jj split`/`jj
+  describe` editor session, so those snapshots become operations concurrent with the
+  outer command's. The check above runs with `--ignore-working-copy` (a snapshot there
+  would be the one that records the operation, since later snapshots find nothing new)
+  and also reports `current_working_copy`; when that's `false`, the later read-only
+  calls — the enumeration call, `jj diff -r` and the file picker's preview — pass
+  `--ignore-working-copy` too, since that revision's diff doesn't depend on the working
+  copy. For `@` itself they still snapshot, so edits made since jj last looked are
+  included. The commit command (`jj describe -r`/`jj split -r`) is left as is. Known limitations of skipping the snapshot:
+  - A revset that depends on file contents (`empty()`, `files()`, `diff_contains()`,
+    `conflicts()`) is evaluated against the last snapshot, so the check can disagree
+    with the files on disk — and with the later commit command, which does snapshot.
+    The Neovim wrapper passes a change id, which doesn't depend on file contents.
+  - In a colocated git repo, jj imports git HEAD/refs as part of the snapshot, so a
+    `git fetch`/`git commit` since the last jj command is invisible to the check and to
+    the non-`@` diff calls: a bookmark name can be stale, and a revision that just
+    became immutable (via `trunk()`) is caught only by the commit command.
+- **jj only.** Git's editor flow (`COMMIT_EDITMSG`) is always about the index, so there's
+  no corresponding need, and "describe an existing git commit" would mean amend/fixup
+  semantics `ccm` doesn't otherwise have.
+- **The commit-command picker is skipped under `--revision`.** `jj commit` only ever
+  acts on the working copy, which leaves exactly one applicable command — `jj split -r`
+  when scoped, `jj describe -r` otherwise — and a picker with one choice is just a
+  confirmation keypress. This is the same "nothing to choose, don't ask" rule the
+  interactive file picker applies to a single changed file. A scope that turns out to
+  cover every changed file of the revision is treated as unscoped (`jj describe -r`):
+  `jj split -r` with everything selected succeeds but leaves an empty, undescribed
+  revision behind (verified with jj 0.45.1). The check reuses the enumeration
+  `--include`/`--exclude` already ran; the file picker's selection is enumerated once
+  more, so a file added to the revision while the picker was open (written into `@`,
+  or squashed in by a concurrent jj operation) makes it fall back to `jj split -r`.
+  For `-r @` it shares the working-copy drift the unscoped case already accepts. The
+  picker skip applies even to `-r @`: special-casing a revset that happens to resolve
+  to the working copy would make the picker's shape depend on revset evaluation rather
+  than on the flags the user passed.
+- **The `fzf` preview gets the revset through the environment.** The file picker's
+  `--preview` is a shell command line run by `fzf` under the user's `$SHELL`, and
+  `<REVSET>` is arbitrary user input. Rather than quote it for every shell `fzf` might
+  use (`sh` and `fish` disagree about backslashes inside single quotes), `ccm` sets
+  `CCM_PREVIEW_REVISION` on the `fzf` process and the preview references
+  `"$CCM_PREVIEW_REVISION"`, which expands to exactly one unexamined word under POSIX
+  shells and fish alike. A `$SHELL` with different variable syntax (e.g. nushell) gets a
+  broken preview under `--revision` — the selection itself still works — which is
+  accepted rather than pinning `fzf`'s preview shell for everyone.
+
 ## Diff scope resolution
 
 ### Why not jj's fileset `~` operator
@@ -101,7 +192,9 @@ itself and resolves `--include`/`--exclude` against that list.
 
 The enumeration produces one entry per changed file rather than a deduplicated set of
 bare strings (see the rename/copy handling below for why that distinction matters). It
-runs `jj --no-pager diff --color=never -T <template>`, using the same
+runs `jj --no-pager diff --color=never [-r <REVSET>] -T <template>` (plus
+`--ignore-working-copy` for a `--revision` other than `@`, see "Revision selection"
+above), using the same
 color/pager-suppressing flags as "Diff generation" above since this output is parsed
 programmatically too. `<template>` is jj's own template-expression language (`jj help -k
 templates`), not a flag `ccm` invents: it renders one
@@ -181,6 +274,10 @@ paths instead means such a file is simply never included, no matter how long the
 takes to finish. The cost is that "select everything" still triggers `jj split` rather
 than `jj describe` even though nothing was actually excluded — accepted as the price of
 not silently including an unseen file.
+
+Under `--revision`, the marked list stays pinned the same way; diff generation then
+enumerates the revision once more and records the message with `jj describe -r` if the
+list still covers every changed file (see "Revision selection (`--revision`)").
 
 ## Editor temp file and `$EDITOR` invocation
 
@@ -312,7 +409,9 @@ process has actually been reaped, not while the grace period is still running.
       `command | fzf` idiom, just invoked directly rather than through a shell pipe.
       For the file picker: `ccm` writes one `<status>  <path>` line per changed file
       (`--multi`, so any number can be marked) and additionally sets `--preview=jj
-      --no-pager diff --color=always -- {2..}` so the highlighted file's own diff
+      --no-pager diff --color=always -- {2..}` (with `--revision`, also `-r
+      "$CCM_PREVIEW_REVISION"`, plus `--ignore-working-copy` when that revision isn't
+      `@`) so the highlighted file's own diff
       renders live in a side pane — `{2..}` is `fzf`'s own placeholder for "every field
       from the highlighted line from the 2nd column onward" (the leading status
       character is column 1), substituted and shell-quoted by `fzf` itself before

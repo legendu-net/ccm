@@ -24,4 +24,6 @@ pub mod progress;
 pub mod prompt;
 pub mod repo;
 pub mod term;
+#[cfg(test)]
+mod testutil;
 pub mod vcs;

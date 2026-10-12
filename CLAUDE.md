@@ -9,7 +9,10 @@ the current diff (via an OpenAI-compatible API or a local agent CLI), lets the u
 regenerate/edit/accept it, and commits it — for both Git and Jujutsu (jj) repositories,
 including colocated ones. Linux/macOS only.
 
-**`prd.md` is the normative spec.** It is long (~1300 lines) and extremely detailed —
+**`prd.md` is the normative spec** (product requirements: user-visible behavior);
+**`design.md`** is its companion design doc (implementation approach, rationale, rejected
+alternatives, dependency preferences), with sections corresponding to `prd.md`'s.
+`prd.md` is long (~1200 lines) and extremely detailed —
 exact wording of every prompt, every exit code's precise trigger, every progress-log
 line, argument-shape usage errors, etc. Source comments throughout `src/` cite it by
 section name (e.g. `// prd.md "Diff scope resolution"`). When changing behavior:
@@ -18,7 +21,8 @@ section name (e.g. `// prd.md "Diff scope resolution"`). When changing behavior:
 2. Update `prd.md` in the same change if behavior changes. It is treated as
    documentation, not an artifact that trails the code — several sections cross-reference
    each other by heading name (`see "Selection"`, `see "Interactive terminal
-   requirement"`), so a partial update leaves it internally inconsistent.
+   requirement"`), so a partial update leaves it internally inconsistent. Likewise
+   update `design.md` if the implementation approach or its rationale changes.
 3. `README.md` is a shorter, user-facing summary of the same behavior (flags, exit
    codes, config). Keep it in sync too, but `prd.md` is authoritative on any conflict.
 
@@ -160,7 +164,7 @@ to run falls back to the numbered stdin prompt (`progress::fzf_unavailable` logs
   favor real subprocesses over mocks for git/jj (spin up a real repo in a `tempfile`
   TempDir — see the `git_repo()`/`jj_repo()` helpers repeated across `diff.rs`,
   `commit.rs`, `pipeline.rs`, `fileselect.rs`) — this is a deliberate project preference
-  (see `prd.md`'s "Preferences of Dependencies"), not an oversight to "fix" by mocking.
+  (see `design.md`'s "Preferences of Dependencies"), not an oversight to "fix" by mocking.
 - `tests/*.rs` integration tests drive the **real compiled binary** as a subprocess via
   `assert_cmd`, using the shared `Fixture` helper in `tests/common/mod.rs` (repo/config
   scaffolding, a sanitized `$PATH`, fake `$EDITOR` scripts). `tests/backend_openai.rs` is

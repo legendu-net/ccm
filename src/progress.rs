@@ -15,7 +15,7 @@
 //! OmniRoute) that picks the real upstream model dynamically, which the configured
 //! `<model>` doesn't capture on its own. This isn't from prd.md's "Progress logging"
 //! list — neither is [`raw_and_cleaned_message`], which dumps the backend's response
-//! before and after `cleanup::clean_message` so a fence/quote-stripping bug (or an
+//! before and after `cleanup::clean_message` so a cleanup bug (or an
 //! LLM's own formatting choice) is visible directly in the log rather than only
 //! inferable from the final message.
 
@@ -33,30 +33,59 @@ pub fn generating_commit_message(
     writeln!(out, "Generating commit message using {name} ({model})…")
 }
 
-/// Logs the backend's response exactly as returned (`raw`) alongside the result of
+/// Logs the backend's response (`raw`) alongside the result of
 /// running it through `cleanup::clean_message` (`cleaned`). When `cleanup` was a no-op
 /// (the common case), collapses both into a single `Raw/Cleaned message` dump instead
-/// of printing the same text twice; when it actually stripped a wrapping code fence or
-/// quotes, prints `Raw message` and `Cleaned message` separately so the difference is
+/// of printing the same text twice; when it actually changed something (stripped
+/// terminal escapes, a wrapping code fence, quotes, or surrounding whitespace),
+/// prints `Raw message` and `Cleaned message` separately so the difference is
 /// visible directly in the log rather than only inferable from the final message. Each
 /// label sits on its own dash-padded header line (see [`padded_header`]) since the
 /// message itself can span multiple lines, making it hard to tell where it starts
 /// without one.
+///
+/// Both dumps go through [`escape_controls`] first: `raw` can carry terminal escape
+/// sequences (which `cleanup` strips from `cleaned`), and writing those to stderr
+/// verbatim would have the user's terminal execute them (hide the cursor, retitle the
+/// window, ...) while leaving them invisible — so the two blocks would look identical
+/// even though cleanup changed something.
 pub fn raw_and_cleaned_message(
     out: &mut (impl Write + ?Sized),
     raw: &str,
     cleaned: &str,
 ) -> io::Result<()> {
     if raw == cleaned {
-        writeln!(out, "{}\n{raw}", padded_header("Raw/Cleaned message"))
+        writeln!(
+            out,
+            "{}\n{}",
+            padded_header("Raw/Cleaned message"),
+            escape_controls(raw)
+        )
     } else {
         writeln!(
             out,
-            "{}\n{raw}\n{}\n{cleaned}",
+            "{}\n{}\n{}\n{}",
             padded_header("Raw message"),
-            padded_header("Cleaned message")
+            escape_controls(raw),
+            padded_header("Cleaned message"),
+            escape_controls(cleaned)
         )
     }
+}
+
+/// Renders every control character in `text` except `\n` and `\t` as a visible Rust
+/// escape (e.g. ESC as `\u{1b}`, CR as `\r`), so it's shown rather than executed by the
+/// terminal. Everything else, including non-ASCII text, passes through unchanged.
+fn escape_controls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() && c != '\n' && c != '\t' {
+            out.extend(c.escape_debug());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Centers `label` in a `-`-padded 40-column header line, e.g. `------ Raw message
@@ -204,6 +233,28 @@ mod tests {
                 padded_header("Raw message"),
                 padded_header("Cleaned message")
             )
+        );
+    }
+
+    #[test]
+    fn raw_and_cleaned_message_shows_terminal_escapes_in_raw_instead_of_emitting_them() {
+        let logged = captured(|w| raw_and_cleaned_message(w, "\x1b[?12l\x1b[?25hhi\r\n", "hi"));
+        assert_eq!(
+            logged,
+            format!(
+                "{}\n\\u{{1b}}[?12l\\u{{1b}}[?25hhi\\r\n\n{}\nhi\n",
+                padded_header("Raw message"),
+                padded_header("Cleaned message")
+            )
+        );
+        assert!(!logged.contains('\x1b'));
+    }
+
+    #[test]
+    fn escape_controls_keeps_newlines_tabs_and_non_ascii_text() {
+        assert_eq!(
+            escape_controls("a\tb\nc é \u{7}\u{9d}"),
+            "a\tb\nc é \\u{7}\\u{9d}"
         );
     }
 

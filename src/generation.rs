@@ -1,7 +1,8 @@
 //! Stage 7 of the check-order pipeline: message generation (prd.md "Selection" /
 //! "Response cleanup" / Progress logging). Dispatches to the selected entry's backend,
-//! applies the response-cleanup pass (`cleanup::clean_message` — strips a wrapping code
-//! fence, then a wrapping pair of quotation marks), and logs the surrounding progress
+//! applies the response-cleanup pass (`cleanup::clean_message` — strips terminal escape
+//! sequences and stray control characters, trims, then strips a wrapping code fence,
+//! then a wrapping pair of quotation marks), and logs the surrounding progress
 //! lines. The blank-message hard failure (exit 15) is a stage-8 concern applied
 //! differently by `--dry-run` vs. the default editor flow, so this module only logs
 //! whether the *cleaned* result was blank and hands it back.

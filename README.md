@@ -126,6 +126,8 @@ earliest-listed stage below wins.
 
 All progress output ("Generating diff using: ...", etc.) goes to stderr; stdout is
 reserved for `--dry-run`'s message and `--gen-config`'s report.
+Response dumps escape control characters other than newline and tab so terminal
+control codes remain visible and inert in the log.
 
 ## Development
 

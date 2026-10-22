@@ -594,18 +594,39 @@ Immediately after stage 7 (Generation) gets a response back from the selected to
 and before that response is used for anything else — printed under `--dry-run`, or shown
 at the message review prompt and, if edit is chosen there, pre-populated into the
 `$EDITOR` temp file (see "Message review prompt" and "Message pre-population and
-cleanup" below) — `ccm` runs it through one cleanup pass: it trims leading/trailing
-whitespace unconditionally, then strips a single Markdown code fence wrapping the whole
+cleanup" below) — `ccm` runs it through one cleanup pass: it strips terminal escape
+sequences and stray control characters, then trims leading/trailing whitespace
+unconditionally, then strips a single Markdown code fence wrapping the whole
 response, then a single pair of matching quotation marks wrapping the whole response or
 just its first line. Some LLMs answer with the message inside a ```…``` block, or as a
 quoted string (e.g. `"feat: add x"`), regardless of what the prompt asks for; a chatty
 LLM or an `echo`-based `agent_cli` (see Requirement 3) also routinely leaves a trailing
-newline or other stray whitespace even without either wrapper. Centralizing this cleanup
+newline or other stray whitespace even without either wrapper; and some agent CLIs write
+terminal control codes (e.g. `ESC[?12l ESC[?25h` to restore the cursor) to stdout even
+when it's a pipe. Centralizing this cleanup
 here means every caller — the default `$EDITOR` flow, `--dry-run`, and any other
 consumer of `ccm`'s output — gets it for free instead of having to reimplement the same
 cleanup itself (this used to live in the Neovim wrapper described in Goal, ad hoc,
 before the fundamental generation logic moved into `ccm`).
 
+- Terminal escapes: removed first, regardless of which tool/API produced the response,
+    so they can't hide a fence or quote-wrap from the steps below or make a blank
+    response look non-blank (e.g. `\x1b[?12l\x1b[?25hhi` cleans to `hi`, and a response
+    that's nothing but escape sequences cleans to blank). Dropped in full: CSI sequences
+    (`ESC [` …, e.g. colors and cursor control), OSC/DCS/SOS/PM/APC strings (through
+    their `ESC \` or BEL terminator, e.g. window titles and hyperlinks), and other `ESC`
+    sequences (e.g. `ESC ( B`, `ESC 7`). Any other control character except newline and
+    tab is dropped too, one character at a time — including 8-bit C1 characters, which
+    are not treated as sequence introducers (in practice they come from mis-decoded
+    text, and treating one as the start of an unterminated sequence would swallow real
+    message text after it), and carriage return, so CRLF line endings become plain LF
+    (a spinner-style `Loading…\rfeat: x` becomes `Loading…feat: x`, not `feat: x`). A
+    lone `ESC` that doesn't start a recognized sequence is dropped by itself; an
+    unterminated sequence at the very end of the response is dropped through the end.
+    As a complementary prevention step, `ccm` also sets `TERM=dumb` and `NO_COLOR=1`
+    for every `agent_cli` child (see `env` under `type: agent_cli` fields), so a
+    well-behaved CLI doesn't emit these codes at all; this stripping still covers one
+    that ignores them.
 - Code fence: the response's first line must be a bare opening fence — a run of at least
     3 backticks, optionally followed by a language tag, and nothing else (a line with
     text after the backticks, e.g. "```feat: add x", is the message itself, not a
@@ -622,14 +643,15 @@ before the fundamental generation logic moved into `ccm`).
     tried, so a quoted subject with an unquoted body is still cleaned up.
 
 This pass runs unconditionally, in both `--dry-run` and the default `$EDITOR` flow alike
-— a fenced or quoted response is equally unwanted either way, and it runs before the
-exit-code-15 blank check either mode applies (a response that's exactly an empty fenced
-block, e.g. "``` ```", cleans down to blank and is correctly treated as one, and a
-response that's entirely whitespace trims down to blank the same way). The
-leading/trailing-whitespace trim is unconditional — the result is always at least
-`raw.trim()`, whether or not a fence or quote-wrap also applied — so `--dry-run`'s
-stdout, the message review prompt's displayed text, and `$EDITOR`'s pre-population never
-carry incidental surrounding whitespace the tool/API happened to answer with.
+— a fenced, quoted, or escape-laden response is equally unwanted either way, and it runs
+before the exit-code-15 blank check either mode applies (a response that's exactly an
+empty fenced block, e.g. "``` ```", cleans down to blank and is correctly treated as
+one, and a response that's entirely whitespace or escape sequences cleans down to blank
+the same way). The leading/trailing-whitespace trim is unconditional — the result is
+always at least the escape-stripped response, trimmed, whether or not a fence or
+quote-wrap also applied — so `--dry-run`'s stdout, the message review prompt's
+displayed text, and `$EDITOR`'s pre-population never carry incidental surrounding
+whitespace or terminal control codes the tool/API happened to answer with.
 
 This step is orthogonal to the `#CCM: `-comment cleanup described next: that one strips
 scaffolding `ccm` itself writes into the `$EDITOR` temp file, while this one cleans up
@@ -758,7 +780,15 @@ adapted to `ccm`'s no-fallback selection (Requirement 4: the first enabled tool/
 is used, and if it fails, it fails — there's no "try the next one" step to report).
 Every line below is written to stderr, never stdout, regardless of `--dry-run` — stdout
 is reserved solely for the generated message under `--dry-run`, so progress output
-never ends up mixed into it even when stdout is piped/captured. Roughly, in order:
+never ends up mixed into it even when stdout is piped/captured.
+
+The response dumps (`Raw message`, `Cleaned message`, or `Raw/Cleaned message` when
+identical) render control characters other than newline and tab as visible Rust escapes
+(e.g. ESC as `\u{1b}` and carriage return as `\r`). This keeps terminal commands inert
+and makes the raw response's control characters visible; ordinary text, newlines, and
+tabs retain their layout. This escaping only affects progress logs, not the message.
+
+Progress lines appear roughly in this order:
 
 - `Generating diff using: <command>` — before running the `git diff`/`jj diff` invocation.
     For jj with `--include`/`--exclude`, the `jj diff -T <template>` enumeration call
@@ -768,7 +798,7 @@ never ends up mixed into it even when stdout is piped/captured. Roughly, in orde
 - `Generating commit message using <name> (<model>)…` — before calling the selected
     `api.yaml` entry.
 - `Generated empty message using <name> (<model>)` — if the tool/API's response, after
-    the response-cleanup pass (see "Response cleanup" below), is blank (see exit code 15).
+    the response-cleanup pass (see "Response cleanup" above), is blank (see exit code 15).
 - `Commit message generated by <name> (<model>)` — once a non-blank cleaned message comes
     back, preceded by a dash line to set it off from the message dump above it.
 - `Committed using: <command>` — default (non-`--dry-run`) mode only, once `$EDITOR`
@@ -1049,6 +1079,10 @@ jj's, whichever "Diff generation" produced) already makes clear where it starts.
     longer substituted, so leaving it in place would otherwise silently pass the seven
     literal characters `{{prompt}}` to the agent CLI as an argument.
 - `env` (map<string,string>, optional) — extra environment variables for the child process.
+    `ccm` always sets `TERM=dumb` and `NO_COLOR=1` for the child first, so an agent CLI
+    that honors them doesn't write terminal escape sequences into the captured response
+    (see "Response cleanup", which strips any that still come through); an `env` entry
+    for either key overrides that default.
 - `timeout` (see `timeout` under Common fields above) — wall-clock limit measured from
     spawning the subprocess. This is the safety net for an agent CLI that hangs for a
     reason `ccm` can't prevent directly — a network call stuck inside the agent CLI

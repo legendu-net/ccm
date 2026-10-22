@@ -11,6 +11,13 @@ use crate::vcs::exec::{self, ExecError, RunSpec};
 use std::path::Path;
 use std::time::Duration;
 
+/// Environment set for every `agent_cli` child (prd.md, `env` under `type: agent_cli`
+/// fields), so a well-behaved CLI doesn't emit terminal escape sequences (cursor
+/// control, colors) into its captured stdout in the first place. `cleanup` strips any
+/// that still come through from a CLI that ignores these. An entry's own `env` can
+/// override either.
+const DEFAULT_ENV: [(&str, &str); 2] = [("TERM", "dumb"), ("NO_COLOR", "1")];
+
 /// Drives one `agent_cli` entry.
 pub struct AgentCliGenerator<'a> {
     entry: &'a AgentCliEntry,
@@ -32,11 +39,12 @@ impl MessageGenerator for AgentCliGenerator<'_> {
     ) -> Result<GenerationOutcome, GenerationError> {
         let args = prompt::substitute_args(&self.entry.args, prompt.system, &self.entry.model);
         let stdin_payload = prompt::user_message(prompt.template, diff);
-        let env: Vec<(String, String)> = self
-            .entry
-            .env
+        // Defaults first so the entry's own `env` (applied after, and thus winning on a
+        // duplicate key) can override them.
+        let env: Vec<(String, String)> = DEFAULT_ENV
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .chain(self.entry.env.iter().map(|(k, v)| (k.clone(), v.clone())))
             .collect();
         let spec = RunSpec {
             program: &self.entry.command,
@@ -200,6 +208,26 @@ mod tests {
         let generator = AgentCliGenerator::new(&e, &cwd);
         let out = generator.generate(&prompt(), "diff").unwrap();
         assert_eq!(out.message, "hello\n");
+    }
+
+    #[test]
+    fn term_dumb_and_no_color_are_set_by_default() {
+        let e = sh_script("echo \"$TERM/$NO_COLOR\"", 30);
+        let cwd = std::env::temp_dir();
+        let generator = AgentCliGenerator::new(&e, &cwd);
+        let out = generator.generate(&prompt(), "diff").unwrap();
+        assert_eq!(out.message, "dumb/1\n");
+    }
+
+    #[test]
+    fn entry_env_overrides_the_default_term_and_no_color() {
+        let mut e = sh_script("echo \"$TERM/$NO_COLOR\"", 30);
+        e.env.insert("TERM".to_string(), "xterm".to_string());
+        e.env.insert("NO_COLOR".to_string(), String::new());
+        let cwd = std::env::temp_dir();
+        let generator = AgentCliGenerator::new(&e, &cwd);
+        let out = generator.generate(&prompt(), "diff").unwrap();
+        assert_eq!(out.message, "xterm/\n");
     }
 
     #[test]

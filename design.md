@@ -325,6 +325,27 @@ grace period for the process to exit on its own, then sends `SIGKILL` if it's st
 running (`vcs/exec.rs`). Either way, the failure (exit code 10) is reported once the
 process has actually been reaped, not while the grace period is still running.
 
+## Response cleanup: terminal escape stripping
+
+Escape stripping (`prd.md` "Response cleanup") is a small hand-rolled scanner in
+`cleanup.rs` rather than a crate like https://crates.io/crates/strip-ansi-escapes (which
+pulls in the `vte` parser): the grammar needed — CSI, OSC/DCS/SOS/PM/APC strings, and
+other 7-bit `ESC` sequences — fits in a few dozen lines, is pure and fully unit-tested,
+and also handles the "drop every other stray control character" part that a pure ANSI
+stripper wouldn't. 8-bit C1 characters are deliberately dropped one at a time rather
+than parsed as sequence introducers: UTF-8 terminals don't interpret them that way, and
+they mostly show up as mojibake (e.g. `”` decoded as Latin-1 ends in `U+009D`, the
+8-bit OSC introducer), where an unterminated "OSC" would silently eat the rest of the
+message. It runs in `cleanup` rather than in the `agent_cli` backend
+so it covers every tool/API alike. Setting `TERM=dumb`/`NO_COLOR=1` for `agent_cli`
+children is only a prevention layer on top — many CLIs ignore them, so it can't replace
+the stripping.
+
+Progress response dumps separately escape control characters other than newline and
+tab with Rust's `char::escape_debug`, preserving readable multiline text while showing
+the raw control codes without executing them in the terminal. This display-only step
+applies to both raw and cleaned dumps and does not alter the generated message.
+
 ## Preferences of Dependencies
 
 1. I prefer the Rust crate https://crates.io/crates/litellm-rs
